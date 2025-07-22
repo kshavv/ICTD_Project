@@ -1,7 +1,7 @@
 //***********************New and improved biweekly flood maps*********************************//
 
 
-// Defining the area of interest
+// Defining the AOI
 var districts = ee.FeatureCollection("FAO/GAUL/2015/level2");
 var aoi = districts.filter(ee.Filter.and(
   ee.Filter.eq("ADM1_NAME", "Assam"),
@@ -73,24 +73,37 @@ function biWeeklyMasks(year) {
   
   return biWeeklyMasksCollection;
 }
-
-//************************ Find and store the masks for all years *************************************************//
-var biWeeklyMasksByYear = years.map(biWeeklyMasks);
+var biWeeklyMasksByYear = years.map(biWeeklyMasks); // calling the above function and storing masks for all the years
 
 
-//------------------------ Classification starts here -------------------------------
+//*********************
+//*********************
+//*********************
+//*********************
 
-//1. Finding the Perennial Water and non-water pixels
+/**
+***************DATA IS COLLECTED AT THIS POINT. STARTING THE CLASSIFICATION***********************
+**/
+
+
+/**
+ * STEP 1...
+ * Classifying into perennial, non water and unclassified pixel.
+ * This classification is done using the entire data collected and can be updated using the CONFIG variable
+ * There will be a further classification post selecting the year and week.
+ * That classification will further classify the unclassified pixels into perennial,flood,seasonal for the given year and week
+ * 
+ **/
 function classifyPerennialAndNonWater(years, monsoonStart, monsoonEnd, aoi, threshold, perennialThreshold) {
 
-  // 2. Calculate the total number of bi-weekly periods across all years.
+  //Calculate the total number of bi-weekly periods across all years.
   var totalBiWeeks = years.map(function(year) {
     var start = ee.Date.fromYMD(year, monsoonStart, 1);
     var end = ee.Date.fromYMD(year, monsoonEnd, 30);
     return end.difference(start, 'week').divide(2).floor();
   }).reduce(ee.Reducer.sum());
 
-  // 3. Sum the bi-weekly water masks to get water presence count.
+  //Sum the bi-weekly water masks to get water presence count.
   var waterPresenceSum = ee.Image(0);
   for (var i = 0; i < years.size().getInfo(); i++) {
     var yearCollection = ee.ImageCollection(biWeeklyMasksByYear.get(i));
@@ -101,12 +114,12 @@ function classifyPerennialAndNonWater(years, monsoonStart, monsoonEnd, aoi, thre
     }
   }
 
-  // 4. Calculate the proportion of time water is present.
+  // proportion of time water was present
   var waterPresenceProportion = waterPresenceSum.divide(ee.Image.constant(totalBiWeeks));
   
-  // 5. Classify pixels
-  var perennialWater = waterPresenceProportion.gte(perennialThreshold).rename('perennial_water');
-  var nonWater = waterPresenceProportion.eq(0).rename('non_water');
+  // Classifying the pixels
+  var perennialWater = waterPresenceProportion.gte(perennialThreshold).rename('perennial_water'); //perennial threshold is 0.85
+  var nonWater = waterPresenceProportion.eq(0).rename('non_water'); // if the water presence was 0 across all images then its a permanent non water pixel
 
   var classification = ee.Image(0)
     .where(perennialWater, 1)
@@ -115,12 +128,25 @@ function classifyPerennialAndNonWater(years, monsoonStart, monsoonEnd, aoi, thre
   return classification.clip(aoi);
 }
 
+//storing the classification 
+//This is the initial classification. Further classification requires selecting 
+//the year and date.
 var perennialAndNonWaterClassification = classifyPerennialAndNonWater(years, monsoonStart, monsoonEnd, aoi, threshold, 0.85);
+
+//!This can be removed later(for testing purposes)!
 Map.addLayer(perennialAndNonWaterClassification, { palette: ['000000', '0000FF','00BB00'], min:0, max:2 }, 'Perennial and Non-Water');
 
-// Function to display the selected bi-weekly water mask
-// Function to display the selected bi-weekly water mask
-// Function to display the selected bi-weekly water mask
+
+
+
+
+/**
+*STEP 2...
+* creating a function for classifying the unclassified pixels
+* This function will be triggered when the inputs are provided and generates a fully classified flood map for 
+* the provided period
+* 
+**/
 function displaySelectedMask() {
   var weekFreq = 0.6; // This is now bi-weekly frequency
   var yearFreq = 0.8;
@@ -128,25 +154,20 @@ function displaySelectedMask() {
   var selectedYear = yearSelect.getValue();
   var selectedBiWeek = ee.Number(biWeekSelect.getValue()).toInt();
 
-  // Access the ImageCollection for the selected year
+
   var selectedYearCollection = ee.ImageCollection(biWeeklyMasksByYear.get(years.indexOf(selectedYear)));
 
   // Filter the ImageCollection for the selected bi-week
   var selectedMask = selectedYearCollection
     .filterMetadata('biweek', 'equals', selectedBiWeek)
     .first();
-
-  // Check if an image was found BEFORE using it.
+    
   if (selectedMask) {
     // Since we confirmed selectedMask exists, we cast it to an ee.Image
     selectedMask = ee.Image(selectedMask);
-
-    // --- LOGGING CODE RESTORED HERE ---
     var selectedBiWeekStartDate = ee.Date.fromYMD(selectedYear, monsoonStart, 1).advance(selectedBiWeek.multiply(2), 'week');
     print('Processing data for bi-week starting:', selectedBiWeekStartDate.format('YYYY-MM-dd'));
-    // ------------------------------------
 
-    var weeklyNonWaterMask = selectedMask.eq(0).rename('weekly_non_water');
 
     var monsoonBiWeeks = years.map(function(year) {
       var start = ee.Date.fromYMD(year, monsoonStart, 1);
@@ -165,6 +186,8 @@ function displaySelectedMask() {
     // Find water frequency for the "selected year" across all bi-weeks
     var waterFrequencyThisYear = selectedYearCollection.reduce(ee.Reducer.sum()).divide(totalMonsoonBiWeeks);
 
+    //non water pixel for the provided week
+    var weeklyNonWaterMask = selectedMask.eq(0).rename('weekly_non_water'); //the water is present on the pixel for the given bi-week
     var unclassifiedPixels = perennialAndNonWaterClassification.eq(0);
     var newNonWaterPixels = unclassifiedPixels.and(weeklyNonWaterMask);
 
@@ -176,22 +199,24 @@ function displaySelectedMask() {
     var newPerrenialWater = waterFrequencyThisYear.gte(yearFreq).rename('new_seasonal_water').and(alreadyClassified.eq(0).and(seasonalWater.not().and(floodWater.not())));
 
     var finalClassification = alreadyClassified.where(seasonalWater, 3).where(floodWater, 4).where(newPerrenialWater, 5);
-
+    
+    
+    //rendering the image
     Map.layers().set(1, ui.Map.Layer(finalClassification.clip(aoi), {
       palette: ['000000', '0000FF', '00BB00', 'yellow', 'red', '72A1ED'],
       min: 0,
       max: 5
     }, 'Water Classification'));
 
-    Export.image.toDrive({
-      image: finalClassification,
-      description: 'finalClassification_biweekly',
-      fileNamePrefix: 'finalClassification_biweekly',
-      region: aoi.geometry(),
-      scale: 30,
-      crs: 'EPSG:4326',
-      maxPixels: 1e13
-    });
+    // Export.image.toDrive({
+    //   image: finalClassification,
+    //   description: 'finalClassification_biweekly',
+    //   fileNamePrefix: 'finalClassification_biweekly',
+    //   region: aoi.geometry(),
+    //   scale: 30,
+    //   crs: 'EPSG:4326',
+    //   maxPixels: 1e13
+    // });
 
   } else {
     // This block runs if no image was found for the selection.
@@ -200,7 +225,22 @@ function displaySelectedMask() {
   }
 }
 
-// -------------------- UI ----------------------------
+
+
+
+
+
+
+
+
+
+//***************************
+//***************************
+//***************************
+//***************************
+//***************************
+
+// -------------------- Start of the UI part ----------------------------
 var panel = ui.Panel({ style: { width: '300px' } });
 var yearSelect = ui.Select({
   items: years.getInfo().map(function(year) {
