@@ -1,0 +1,120 @@
+import os
+import numpy as np
+from osgeo import gdal, osr
+from glob import glob
+from PIL import Image
+
+# === CONFIGURATION ===
+TILE_DIR = "flood_tiles"
+OUTPUT_PATH = "flood_union.tif"
+
+# === Step 1: Gather all tile PNGs and their world files ===
+tile_paths = sorted(glob(os.path.join(TILE_DIR, "*.png")))
+
+if not tile_paths:
+    raise FileNotFoundError("No tiles found in directory.")
+
+# === Step 2: Read georeferencing from the world file ===
+def get_georef_from_worldfile(wld_path, width, height):
+    with open(wld_path, 'r') as f:
+        px_size_x = float(f.readline())
+        _ = f.readline()  # skip
+        _ = f.readline()  # skip
+        px_size_y = -abs(float(f.readline()))  # Ensure north-up
+        x_min = float(f.readline())
+        y_max = float(f.readline())
+
+    transform = [x_min, px_size_x, 0, y_max, 0, px_size_y]
+    x_max = x_min + width * px_size_x
+    y_min = y_max + height * px_size_y
+    return transform, (x_min, y_min, x_max, y_max)
+
+# Collect all extents
+bounds = []
+transforms = []
+
+for tile in tile_paths:
+    wld = tile.replace(".png", ".wld")
+    img = Image.open(tile)
+    width, height = img.size
+    transform, extent = get_georef_from_worldfile(wld, width, height)
+    transforms.append((tile, transform))
+    bounds.append(extent)
+
+# Get full output extent
+xmins, ymins, xmaxs, ymaxs = zip(*bounds)
+x_min, y_min = min(xmins), min(ymins)
+x_max, y_max = max(xmaxs), max(ymaxs)
+
+# Use pixel size from first tile
+px_w = transforms[0][1][1]  # pixel width
+px_h = transforms[0][1][5]  # pixel height (negative)
+
+cols = int(round((x_max - x_min) / px_w))
+rows = int(round((y_max - y_min) / abs(px_h)))
+
+# === Step 3: Create empty output mask ===
+flood_union = np.zeros((rows, cols), dtype=np.uint8)
+
+# === Step 4: Paste each tile's flood mask ===
+def raster_index(transform, x_min, y_max):
+    px = int(np.floor((x_min - transform[0]) / transform[1]))
+    py = int(np.floor((transform[3] - y_max) / abs(transform[5])))
+    return px, py
+
+for tile_path, transform in transforms:
+    img_pil = Image.open(tile_path)
+    img = np.array(img_pil)
+
+    # Handle grayscale, RGB, RGBA
+    if img.ndim == 2:
+        mask = (img > 0).astype(np.uint8) * 255
+    elif img.ndim == 3 and img.shape[2] >= 3:
+        mask = np.all(img[:, :, :3] == [0, 255, 255], axis=-1).astype(np.uint8) * 255
+    else:
+        print(f"⚠️ Unsupported image shape: {img.shape} for {tile_path}")
+        continue
+
+    tile_rows, tile_cols = mask.shape
+    x_offset, y_offset = raster_index(transform, x_min, y_max)
+
+    print(f"\n🧩 Processing tile: {tile_path}")
+    print(f"  Tile size: {tile_rows} rows x {tile_cols} cols")
+    print(f"  GeoTransform: {transform}")
+    print(f"  Offset in output raster: x={x_offset}, y={y_offset}")
+
+    y_start = max(0, y_offset)
+    x_start = max(0, x_offset)
+    y_end = min(rows, y_offset + tile_rows)
+    x_end = min(cols, x_offset + tile_cols)
+
+    mask_y_start = max(0, -y_offset)
+    mask_x_start = max(0, -x_offset)
+    mask_y_end = mask_y_start + (y_end - y_start)
+    mask_x_end = mask_x_start + (x_end - x_start)
+
+    if y_end > y_start and x_end > x_start:
+        flood_union[y_start:y_end, x_start:x_end] = np.maximum(
+            flood_union[y_start:y_end, x_start:x_end],
+            mask[mask_y_start:mask_y_end, mask_x_start:mask_x_end]
+        )
+    else:
+        print(f" Skipped tile {tile_path}: slice out of bounds")
+        print(f"  Computed bounds: y [{y_start}:{y_end}], x [{x_start}:{x_end}]")
+        print(f"  Mask size: {tile_rows}x{tile_cols}, offsets: y={y_offset}, x={x_offset}")
+
+# === Step 5: Save as GeoTIFF ===
+driver = gdal.GetDriverByName("GTiff")
+out_ds = driver.Create(OUTPUT_PATH, cols, rows, 1, gdal.GDT_Byte)
+out_ds.SetGeoTransform([x_min, px_w, 0, y_max, 0, px_h])
+
+srs = osr.SpatialReference()
+srs.ImportFromEPSG(4326)  # WGS84
+out_ds.SetProjection(srs.ExportToWkt())
+
+out_ds.GetRasterBand(1).WriteArray(flood_union)
+out_ds.GetRasterBand(1).SetNoDataValue(0)
+out_ds.FlushCache()
+out_ds = None
+
+print("\nFinal flood union saved to:", OUTPUT_PATH)
