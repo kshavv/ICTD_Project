@@ -1,21 +1,83 @@
 //***********************New and improved biweekly flood maps*********************************//
 
-
 // Defining the AOI
 var districts = ee.FeatureCollection("FAO/GAUL/2015/level2");
-var aoi = districts.filter(ee.Filter.and(
-  ee.Filter.eq("ADM1_NAME", "Assam"),
-  ee.Filter.or(
-    ee.Filter.eq("ADM2_NAME", "Kamrup"),
-    ee.Filter.eq("ADM2_NAME", "Barpeta"),
-    ee.Filter.eq("ADM2_NAME", "Nalbari")
+
+//assam
+// var aoi = districts.filter(ee.Filter.and(
+//   ee.Filter.eq("ADM1_NAME", "Assam"),
+//   ee.Filter.or(
+//     ee.Filter.eq("ADM2_NAME", "Kamrup"),
+//     ee.Filter.eq("ADM2_NAME", "Barpeta"),
+//     ee.Filter.eq("ADM2_NAME", "Nalbari")
+//   )
+// ));
+
+
+//Kerala
+var region = districts.filter(ee.Filter.and(
+  ee.Filter.eq("ADM1_NAME", "Kerala"),
+    ee.Filter.or(
+    ee.Filter.eq("ADM2_NAME", "Ernakulam"),
+    ee.Filter.eq("ADM2_NAME", "Kottayam"),
+    ee.Filter.eq("ADM2_NAME", "Alappuzha")
   )
 ));
-Map.centerObject(aoi, 10);
 
+/////////////////////////////////////
+//created a new defination for AOI(required due to large size of raster)
+//defining the region bounds in meters
+var regionBoundsSize = 6000;
+var aoi;
+
+// Parameters for shifting
+var shiftX_meters = -11000; // negative = left (west), positive = right (east)
+var shiftY_meters = -10000;  // positive = up (north), negative = down (south)
+
+if (regionBoundsSize) {
+  var centroid = region.geometry().centroid();
+
+  // Convert meters to degrees (approximate)
+  var metersToDegrees = function(meters) {
+    return ee.Number(meters).divide(111320);  // Approx. at equator
+  };
+
+  var shiftX_deg = metersToDegrees(shiftX_meters);
+  var shiftY_deg = metersToDegrees(shiftY_meters);
+
+  var coords = centroid.coordinates();
+  var lon = ee.Number(coords.get(0));
+  var lat = ee.Number(coords.get(1));
+
+  var shiftedLon = lon.add(shiftX_deg);
+  var shiftedLat = lat.add(shiftY_deg);
+
+  var shiftedCentroid = ee.Geometry.Point([shiftedLon, shiftedLat]);
+
+  // Buffer and bound to make square AOI
+  aoi = shiftedCentroid.buffer(regionBoundsSize / 2).bounds();
+} else {
+  aoi = region.geometry().bounds();
+  print('Using default AOI bounds for export.');
+}
+
+Map.centerObject(region, 10);
+////////////////////////////////////////////////////////////
+
+
+//*****************display the aoi boudary********************
+  var empty = ee.Image().byte();
+  var aoiOutline = empty.paint({
+    featureCollection: ee.FeatureCollection(aoi),
+    color: 1,
+    width: 3 // Defines the line width of the outline.
+  });
+  
+  Map.addLayer(aoiOutline, {palette: 'yellow'}, 'Export Bounding Box');
+//************************************
 
 //CONFIGS
-var years = ee.List.sequence(2018, 2022);
+var years = ee.List.sequence(2018, 2024);
 var monsoonStart = 6, monsoonEnd = 9;
 var threshold = -16;
 
@@ -200,6 +262,9 @@ function displaySelectedMask() {
 
     var finalClassification = alreadyClassified.where(seasonalWater, 3).where(floodWater, 4).where(newPerrenialWater, 5);
     
+    //****** additional filters *******//
+    var floodWaterVector = createFloodWaterVectors(finalClassification, aoi, 200000,weekFreq,yearFreq);
+    
     
     //rendering the image
     Map.layers().set(1, ui.Map.Layer(finalClassification.clip(aoi), {
@@ -226,13 +291,106 @@ function displaySelectedMask() {
 }
 
 
+//***************DEFINING THE HELPER FUNCTIONS **********************************
+
+/**
+ * Converts the class of pixel into vector polygons
+ * then filters out the polygons based on  min area
+ * Params - classificationImage (the final classified image)
+ *        - floodClassValue (the class to vectorize)
+ *
+ **/
+function createFloodWaterVectors(classificationImage, aoi, minAreaSqm,weekFreq,yearFreq) {
+  
+  Map.clear(); // clear the prev image
+  Map.centerObject(aoi, 5);
+  
+  var exportScale = 30;
+  print('Native classification scale (m):', classificationImage.projection().nominalScale());
+  print('Using export scale (m):', exportScale);
+  
+
+  // Step 1: Isolate flood pixels (class 3 or 4).
+  var floodMask = classificationImage.eq(3).or(classificationImage.eq(4)).selfMask();
+  
+  
+  // Step 2: Smudge/dilate the mask to generalize the area and connect nearby pixels.
+  var smudgedMask = floodMask.focal_max({
+    radius: 30,
+    units: 'meters'
+  }).selfMask();
+
+  // Step 3: Vectorize the mask to create polygons from the raster data.
+  var floodVectors = smudgedMask.reduceToVectors({
+    geometry: aoi,
+    scale: 30,
+    geometryType: 'polygon',
+    labelProperty: 'class',
+    maxPixels: 1e13
+  });
+  
+  // --- DEBUGGING STEP ---
+  // Check if any vectors were created before area calculation.
+  print('Number of polygons BEFORE area filtering:', floodVectors.size());
+
+  // Step 4: Compute the area of each polygon and store it as a property.
+  floodVectors = floodVectors.map(function(feature) {
+    var area = feature.geometry().area({maxError: 1});
+    return feature.set({'area_m2': area});
+  });
+
+  // Step 5: Filter out polygons that are smaller than the specified minimum area.
+  var filteredVectors = floodVectors.filter(ee.Filter.gte('area_m2', minAreaSqm));
+  
+  // --- DEBUGGING STEP ---
+  // Check if any vectors remain after filtering.
+  print('Number of polygons AFTER area filtering:', filteredVectors.size());
+  
+  // Render the filtered vector polygons to the map for visualization.
+  Map.addLayer(filteredVectors, {color: 'red'}, 'Filtered Flood Polygons');
+
+  //creating a new vector after filtering the polygons(It would be difficult to compare polygon)
+  var emptyImage = classificationImage.multiply(0).byte();
+
+  // "Paint" the polygons onto this correctly-projected empty image.
+  // Pixels covered by a polygon get a value of 1. This avoids reprojection issues.
+  var finalFloodRaster = emptyImage.paint({
+    featureCollection: filteredVectors,
+    color: 1 // This is the value assigned to the pixels within the polygons.
+  }).clip(aoi);
+
+  // Render the final rasterized flood map. The .selfMask() will hide 0 values.
+  Map.addLayer(finalFloodRaster.selfMask(), {palette: ['#0000FF']}, 'Final Flood Raster (Masked)');
+  
+  // Add the raster WITHOUT the mask to confirm it's being created correctly.
+  // You should now see blue areas where your polygons are.
+  Map.addLayer(finalFloodRaster, {min: 0, max: 1, palette: ['black', 'blue']}, 'Final Flood Raster (No Mask)');
 
 
+  // Step 7: Export the final FeatureCollection to your Google Drive.
+  var yearStr = String(yearFreq).replace(/\./g, '_');
+  var weekStr = String(weekFreq).replace(/\./g, '_');
+  
+  var rasterFileName = 'flood_raster_' + yearStr + '_week' + weekStr;
+  var rasterDescription = 'Flood_Raster_' + yearStr + '_week' + weekStr;
+
+  
+  
+  
+  Export.image.toDrive({
+    image: finalFloodRaster,
+    description: rasterDescription,
+    folder: 'keshav_sparsh/FloodMaps',
+    fileNamePrefix: rasterFileName,
+    region: aoi,
+    scale: exportScale,
+    crs: classificationImage.projection()
+  });
 
 
-
-
-
+  // Step 8: Return the final FeatureCollection.
+  return filteredVectors;
+}
 
 //***************************
 //***************************
