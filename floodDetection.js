@@ -8,7 +8,7 @@ var CONFIG = {
   monsoonEnd: 9,
   
   // Classification thresholds
-  threshold: -16,
+  threshold: -16, //sentinel 1 VV threshold
   perennialThreshold: 0.85,
   weekFreq: 0.6,
   yearFreq: 0.8,
@@ -222,20 +222,31 @@ function processSelectedMask(selectedYear, selectedBiWeek, exportResults) {
     
   if (selectedMask) {
     //logging the number of missing images
-    var numExpectedBiWeeks = 9; // Adjust if your season length changes
-    var actualCount = selectedYearCollection.size();
-    var missingCount = ee.Number(numExpectedBiWeeks).subtract(actualCount);
+    // var numExpectedBiWeeks = 9; // Adjust if your season length changes
+    // var actualCount = selectedYearCollection.size();
+    // var missingCount = ee.Number(numExpectedBiWeeks).subtract(actualCount);
     
-    print('Year:', selectedYear, 
-          'Expected biweeks:', numExpectedBiWeeks, 
-          'Available:', actualCount, 
-          'Missing:', missingCount);
+    // print('Year:', selectedYear, 
+    //       'Expected biweeks:', numExpectedBiWeeks, 
+    //       'Available:', actualCount, 
+    //       'Missing:', missingCount);
     
 
-    selectedMask = ee.Image(selectedMask);
-    var selectedBiWeekStartDate = ee.Date.fromYMD(selectedYear, CONFIG.monsoonStart, 1)
-      .advance(ee.Number(selectedBiWeek).multiply(2), 'week');
-    print('Processing data for bi-week starting:', selectedBiWeekStartDate.format('YYYY-MM-dd'));
+    // selectedMask = ee.Image(selectedMask);
+    // var selectedBiWeekStartDate = ee.Date.fromYMD(selectedYear, CONFIG.monsoonStart, 1)
+    //   .advance(ee.Number(selectedBiWeek).multiply(2), 'week');
+    // print('Processing data for bi-week starting:', selectedBiWeekStartDate.format('YYYY-MM-dd'));
+      // ----- Added: Compute totalMonsoonBiWeeks same way as old code -----
+    var monsoonBiWeeks = ee.List(CONFIG.years).map(function(year) {
+      year = ee.Number(year); // ensure it's an ee.Number
+      var start = ee.Date.fromYMD(year, CONFIG.monsoonStart, 1);
+      var end = ee.Date.fromYMD(year, CONFIG.monsoonEnd, 30);
+      return end.difference(start, 'week').divide(2).floor();
+    });
+    
+    var totalMonsoonBiWeeks = ee.Number(monsoonBiWeeks.reduce(ee.Reducer.sum()));
+
+    // -------------------------------------------------------------------
 
     var waterFrequencyThisBiWeek = ee.ImageCollection(yearsEE.map(function(year) {
       var yearIndex = CONFIG.years.indexOf(year);
@@ -244,8 +255,11 @@ function processSelectedMask(selectedYear, selectedBiWeek, exportResults) {
       return ee.Algorithms.If(biWeekImage, ee.Image(biWeekImage), ee.Image(0).selfMask());
     })).reduce(ee.Reducer.sum()).divide(CONFIG.years.length);
 
+
+    // ----- Changed: Use totalMonsoonBiWeeks instead of selectedYearCollection.size() -----
     var waterFrequencyThisYear = selectedYearCollection.reduce(ee.Reducer.sum())
-      .divide(selectedYearCollection.size());
+      .divide(totalMonsoonBiWeeks);
+    // -------------------------------------------------------------------------------------
 
     var weeklyNonWaterMask = selectedMask.eq(0).rename('weekly_non_water');
     var unclassifiedPixels = perennialAndNonWaterClassification.eq(0);
@@ -279,7 +293,7 @@ function processSelectedMask(selectedYear, selectedBiWeek, exportResults) {
     // Update map layer
     if (!CONFIG.batchMode) {
       Map.layers().set(1, ui.Map.Layer(finalClassification.clip(aoi), {
-        palette: ['000000', '0000FF', '00BB00', 'yellow', 'red', '72A1ED'],
+        palette: ['000000', '0000FF', '00FF00', 'yellow', 'red', '72A1ED'],
         min: 0,
         max: 5
       }, 'Water Classification'));
@@ -344,9 +358,9 @@ function createFloodWaterVectors(classificationImage, year, biWeek, exportResult
   
   print('Number of polygons AFTER area filtering:', filteredVectors.size());
   
-  if (!CONFIG.batchMode) {
-    Map.addLayer(filteredVectors, {color: 'red'}, 'Filtered Flood Polygons');
-  }
+  // if (!CONFIG.batchMode) {
+  //   Map.addLayer(filteredVectors, {color: 'red'}, 'Filtered Flood Polygons');
+  // }
 
   var emptyImage = classificationImage.multiply(0).byte();
   var finalFloodRaster = emptyImage.paint({
@@ -392,13 +406,13 @@ function exportFloodResults(classification, floodRaster, floodVectors, year, biW
     });
 
     // Export flood vectors
-    Export.table.toDrive({
-      collection: floodVectors,
-      description: 'flood_vectors_' + regionString + '_' + dateString,
-      folder: CONFIG.driveFolder,
-      fileNamePrefix: 'flood_vectors_' + regionString + '_' + dateString,
-      fileFormat: 'SHP'
-    });
+    // Export.table.toDrive({
+    //   collection: floodVectors,
+    //   description: 'flood_vectors_' + regionString + '_' + dateString,
+    //   folder: CONFIG.driveFolder,
+    //   fileNamePrefix: 'flood_vectors_' + regionString + '_' + dateString,
+    //   fileFormat: 'SHP'
+    // });
   }
 
   if (CONFIG.exportToAsset) {
