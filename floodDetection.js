@@ -1,17 +1,16 @@
 // ==================== CONFIGURATION PARAMETERS ====================
 var CONFIG = {
 
-
   // Time parameters
   years: [2018, 2019, 2020, 2021, 2022, 2023, 2024],
-  monsoonStart: 6,
-  monsoonEnd: 9,
+  monsoonStart: 5,
+  monsoonEnd: 10,
   
   // Classification thresholds
-  threshold: -16, //sentinel 1 VV threshold
-  perennialThreshold: 0.85,
-  weekFreq: 0.6,
-  yearFreq: 0.8,
+  threshold: -16,
+  perennialThreshold: 1,
+  weekFreq: 0.1,
+  yearFreq: 0.1,
   
   // Processing parameters
   minAreaSqm: 200000,
@@ -32,9 +31,6 @@ var CONFIG = {
 
 
 
-
-
-/////////////////************STARTING THE CODE *****************/////////////////////////////
 // ==================== REGION SETUP ====================
 function setupRegion() {
   
@@ -82,14 +78,16 @@ Map.addLayer(aoi, {}, 'AOI');
 
 
 // ==================== SERVER-SIDE DATA COLLECTION FUNCTIONS ====================
-/**
- * Returns Image Collection of water mask over the entire year(monsoon season)
- * uses a threshold to mask out water and non water
- * if there are more than 1 images in 2-weeks then it takes the mean of them
- * if there is no image for the biweek(rare) then a complete 0 image is taken(TODO - we can take the prev available image or mean of the prev and next image)
- * Param - year
- **/
 
+/**
+ * Returns Image Collection of water mask over the entire monsoon season for a given year.
+ * - Uses a threshold to mask out water and non-water.
+ * - If more than 1 image exists in a 2-week period, it takes the mean.
+ * - **If no image exists for a bi-week, it uses the image from the most recent previous bi-week that had data.**
+ * - If the very first bi-week has no data, it creates a zero-mask as a fallback.
+ * @param {ee.Number|number} year The year to process.
+ * @return {ee.ImageCollection} The collection of bi-weekly water masks.
+ */
 function biWeeklyMasks(year) {
   year = ee.Number(year);
   var start = ee.Date.fromYMD(year, CONFIG.monsoonStart, 1);
@@ -102,10 +100,23 @@ function biWeeklyMasks(year) {
       return start.advance(ee.Number(i).multiply(2), 'week');
     });
 
-  var biWeeklyMasksCollection = ee.ImageCollection(starts.map(function(w0) {
+  // Initial state for the iteration: an empty collection and an empty "last valid image".
+  var initialState = ee.Dictionary({
+    'collection': ee.ImageCollection([]),
+    'lastImage': ee.Image().select() // An image with no bands is our placeholder for "none yet"
+  });
+
+  // The function that will be applied to each bi-week start date.
+  var accumulate = function(w0, previousState) {
+    // Cast the inputs to the correct types.
     w0 = ee.Date(w0);
+    previousState = ee.Dictionary(previousState);
+    var collection = ee.ImageCollection(previousState.get('collection'));
+    var lastImage = ee.Image(previousState.get('lastImage'));
+
     var w1 = w0.advance(2, 'week');
 
+    // Get the S1 collection for the current bi-week.
     var col = ee.ImageCollection('COPERNICUS/S1_GRD')
       .filterBounds(aoi)
       .filterDate(w0, w1)
@@ -114,22 +125,53 @@ function biWeeklyMasks(year) {
       .select('VV');
 
     var isCollectionEmpty = col.size().eq(0);
-    var biWeekly = ee.Image(ee.Algorithms.If(isCollectionEmpty, ee.Image().select(), col.mean()));
-    var mask = biWeekly.lt(CONFIG.threshold).unmask(0);
+    
+    // If the collection is NOT empty, the current image is the mean.
+    // If it IS empty, we carry forward the last valid image.
+    var newMean = col.mean();
+    var imageToProcess = ee.Image(ee.Algorithms.If(isCollectionEmpty, lastImage, newMean));
+
+    // **Edge Case Handler**: If imageToProcess has no bands, it means this is the
+    // very first bi-week and it was empty. In this case, we fall back to a zero image.
+    // Otherwise, we use the valid new image or the valid carried-over image.
+    var finalImage = ee.Image(ee.Algorithms.If(
+        imageToProcess.bandNames().size().eq(0),
+        ee.Image(0), // Fallback for the very first step
+        imageToProcess
+    ));
+
+    // Create the mask from the determined image (new, carried-over, or fallback).
+    var mask = finalImage.lt(CONFIG.threshold).unmask(0);
     var biWkNum = w0.difference(start, 'week').divide(2).floor();
 
-    return mask
+    var newMask = mask
       .rename("water")
       .set({
         'year': year,
         'biweek': biWkNum,
         'system:time_start': w0.millis(),
-        'has_data': ee.Algorithms.If(isCollectionEmpty, 0, 1)
+        'has_data': ee.Algorithms.If(isCollectionEmpty, 0, 1) // Note: this now means "had new data this period"
       })
       .clip(aoi);
-  }));
+
+    // Add the new mask to our collection.
+    var newCollection = collection.merge(ee.ImageCollection([newMask]));
+    
+    // Update the "lastImage" state ONLY if we got new data this period.
+    var newLastImage = ee.Image(ee.Algorithms.If(isCollectionEmpty, lastImage, newMean));
+
+    // Return the new state for the next iteration.
+    return ee.Dictionary({
+      'collection': newCollection,
+      'lastImage': newLastImage
+    });
+  };
+
+  // Run the iteration over all bi-week start dates.
+  var finalState = ee.Dictionary(starts.iterate(accumulate, initialState));
   
-  return biWeeklyMasksCollection;
+  // Extract the final collection from the state dictionary.
+  return ee.ImageCollection(finalState.get('collection'));
 }
 
 var yearsEE = ee.List(CONFIG.years);
@@ -137,6 +179,13 @@ var yearsEE = ee.List(CONFIG.years);
 // Collect bi-weekly masks for all years
 var biWeeklyMasksByYear = yearsEE.map(biWeeklyMasks);
 print('Data collection initialized for years:', CONFIG.years);
+
+Map.addLayer(ee.ImageCollection(biWeeklyMasksByYear.get(5)).first(), {
+  min: 0,
+  max: 2,
+  palette: ['black', 'blue', '#00FF00']
+}, "mask");
+
 
 
 
@@ -220,22 +269,11 @@ function processSelectedMask(selectedYear, selectedBiWeek, exportResults) {
     .filterMetadata('biweek', 'equals', selectedBiWeek)
     .first();
     
+  print('selected Year', selectedYear);
+  print('bi week ', selectedBiWeek);
+    
   if (selectedMask) {
-    //logging the number of missing images
-    // var numExpectedBiWeeks = 9; // Adjust if your season length changes
-    // var actualCount = selectedYearCollection.size();
-    // var missingCount = ee.Number(numExpectedBiWeeks).subtract(actualCount);
-    
-    // print('Year:', selectedYear, 
-    //       'Expected biweeks:', numExpectedBiWeeks, 
-    //       'Available:', actualCount, 
-    //       'Missing:', missingCount);
-    
 
-    // selectedMask = ee.Image(selectedMask);
-    // var selectedBiWeekStartDate = ee.Date.fromYMD(selectedYear, CONFIG.monsoonStart, 1)
-    //   .advance(ee.Number(selectedBiWeek).multiply(2), 'week');
-    // print('Processing data for bi-week starting:', selectedBiWeekStartDate.format('YYYY-MM-dd'));
       // ----- Added: Compute totalMonsoonBiWeeks same way as old code -----
     var monsoonBiWeeks = ee.List(CONFIG.years).map(function(year) {
       year = ee.Number(year); // ensure it's an ee.Number
@@ -289,6 +327,8 @@ function processSelectedMask(selectedYear, selectedBiWeek, exportResults) {
     
     // Create flood water vectors
     var floodResults = createFloodWaterVectors(finalClassification, selectedYear, selectedBiWeek, exportResults);
+
+
     
     // Update map layer
     if (!CONFIG.batchMode) {
@@ -301,7 +341,7 @@ function processSelectedMask(selectedYear, selectedBiWeek, exportResults) {
 
     return {
       classification: finalClassification,
-      floodVectors: floodResults.vectors,
+      // floodVectors: floodResults.vectors,
       floodRaster: floodResults.raster
     };
 
@@ -316,6 +356,7 @@ function processSelectedMask(selectedYear, selectedBiWeek, exportResults) {
 
 
 //***************DEFINING THE HELPER FUNCTIONS **********************************
+
 
 /**
  * Converts the class of pixel into vector polygons
@@ -335,7 +376,7 @@ function createFloodWaterVectors(classificationImage, year, biWeek, exportResult
   var floodMask = classificationImage.eq(3).or(classificationImage.eq(4)).selfMask();
   
   var smudgedMask = floodMask.focal_max({
-    radius: 30,
+    radius: 25,
     units: 'meters'
   }).selfMask();
 
@@ -369,7 +410,7 @@ function createFloodWaterVectors(classificationImage, year, biWeek, exportResult
   }).clip(aoi);
 
   if (!CONFIG.batchMode) {
-    Map.addLayer(finalFloodRaster.selfMask(), {palette: ['#0000FF']}, 'Final Flood Raster (Masked)');
+    // Map.addLayer(finalFloodRaster.selfMask(), {palette: ['#0000FF']}, 'Final Flood Raster (Masked)');
     Map.addLayer(finalFloodRaster, {min: 0, max: 1, palette: ['black', 'blue']}, 'Final Flood Raster (No Mask)');
   }
 
@@ -389,16 +430,16 @@ function createFloodWaterVectors(classificationImage, year, biWeek, exportResult
 // ==================== SERVER-SIDE EXPORT FUNCTIONS ====================
 function exportFloodResults(classification, floodRaster, floodVectors, year, biWeek) {
   var dateString = year + '_biweek_' + biWeek;
-  var regionString = CONFIG.state + '_' + CONFIG.districts.join('_');
+  // var regionString = CONFIG.state + '_' + CONFIG.districts.join('_');
   
   if (CONFIG.exportToDrive) {
   
     // Export flood raster
     Export.image.toDrive({
       image: floodRaster,
-      description: 'flood_raster_' + regionString + '_' + dateString,
+      description: 'flood_raster_'  + dateString,
       folder: CONFIG.driveFolder,
-      fileNamePrefix: 'flood_raster_' + regionString + '_' + dateString,
+      fileNamePrefix: 'flood_raster_'  + dateString,
       region: aoi,
       scale: classification.projection().nominalScale(),
       crs: classification.projection(),
@@ -418,7 +459,7 @@ function exportFloodResults(classification, floodRaster, floodVectors, year, biW
   if (CONFIG.exportToAsset) {
     Export.image.toAsset({
       image: classification,
-      description: 'flood_asset_' + regionString + '_' + dateString,
+      description: 'flood_asset_'+ dateString,
       assetId: CONFIG.assetPath + 'flood_classification_' + regionString + '_' + dateString,
       region: aoi,
       scale: 30,
@@ -475,7 +516,7 @@ if (!CONFIG.batchMode) {
       var selectedYear = yearSelect.getValue();
       var selectedBiWeek = biWeekSelect.getValue();
       if (selectedYear && selectedBiWeek !== null) {
-        processSelectedMask(selectedYear, selectedBiWeek, false);
+        processSelectedMask(selectedYear, selectedBiWeek, true); // set to true if want to export
       } else {
         print('Please select both year and bi-week');
       }
@@ -547,7 +588,36 @@ if (!CONFIG.batchMode) {
 }
 
 
+// ====================FUNCTIONS FOR ANALYSIS AND LOG STATS ====================
+// This section is entirely for debugging and analysis
 
+print('===== Image Collection Statistics =====');
+
+// Use a client-side loop to process and print stats for each year.
+CONFIG.years.forEach(function(year) {
+  
+  // 1. Generate the entire collection for the year.
+  //    This is still a server-side object.
+  var singleYearCollection = biWeeklyMasks(year);
+
+  // 2. Calculate the total number of masks generated for the year.
+  var totalImages = singleYearCollection.size();
+  
+  // 3. Calculate how many masks had new data.
+  //    We sum the 'has_data' property (1 for data, 0 for empty).
+  var imagesWithData = singleYearCollection.aggregate_sum('has_data');
+  
+  // 4. The number of empty masks is the total minus those with data.
+  var emptyImages = totalImages.subtract(imagesWithData);
+
+  // 5. Print the server-side objects. GEE will automatically fetch the
+  //    values and display them in the console.
+  print('Year ' + year + ':', {
+    'Total Bi-Weekly Masks': totalImages,
+    'Masks with New Data': imagesWithData,
+    'Empty/Filled Masks': emptyImages
+  });
+});
 
 
 
