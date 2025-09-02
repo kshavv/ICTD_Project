@@ -4,12 +4,12 @@
 var CONFIG = {
   // Time parameters
   years: [2018, 2019, 2020, 2021, 2022, 2023, 2024],
-  monsoonStart: 6,
-  monsoonEnd: 9,
+  monsoonStart: 5,
+  monsoonEnd: 10,
   
   // Classification threshold6
   threshold: -16,
-  perennialThreshold: 0.9,
+  perennialThreshold: 0.95,
   weekFreq: 0.3,
   yearFreq: 0.3,
   
@@ -26,7 +26,7 @@ var CONFIG = {
   // Batch processing mode
   batchMode: true,
 
-  batchWeekFreq: [0.6],
+  batchWeekFreq: [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9],
   batchYearFreq: [0.8]
   // batchWeekFreq: [0.2,0.3,0.6,0.7],
   // batchYearFreq: [0.2,0.3,0.6,0.7]
@@ -122,7 +122,7 @@ function processGroundTruth(gtImage, minAreaSqm) {
   // Step 7: Return the final raster image.
   return finalGTRaster;
 }
-processedGTImage = processGroundTruth(gt2, 500000);
+processedGTImage = processGroundTruth(gt1, 500000);
 
 
 // ==================== SETUP AOI====================
@@ -346,10 +346,16 @@ function processSelectedMask(selectedYear, selectedBiWeek, yearFreq, weekFreq) {
       .where(floodWater, 4)
       .where(newPerennialWater, 5);
     
-    var floodResults = createFloodWaterVectors(finalClassification);
-    // var floodResults = finalClassification.eq(4);
+    // var floodResults = createFloodWaterVectors(finalClassification);
+    var floodResults = finalClassification.eq(4);
     var floodMapName = 'Flood-Week_' + yearFreq +'_'+ weekFreq;
-    Map.addLayer(floodResults, {min: 0, max: 1, palette: ['black', 'blue']}, floodMapName);
+    
+    // Map.addLayer(floodResults, {min: 0, max: 1, palette: ['black', 'blue']}, floodMapName);
+    Map.layers().set(1, ui.Map.Layer(finalClassification.clip(aoi), {
+      palette: ['000000', '0000FF', '00FF00', 'yellow', 'red', '72A1ED'],
+      min: 0,
+      max: 5
+    }, floodMapName));
     
     return {
       floodResults: floodResults,
@@ -447,7 +453,7 @@ function processNextCombination(combinationIndex) {
   if (combinationIndex >= parameterCombinations.length) {
     // All combinations processed, generate ROC curve
     print('All combinations processed. Generating ROC curve...');
-    generateROCCurve();
+    // generateROCCurve();
     return;
   }
   
@@ -458,24 +464,28 @@ function processNextCombination(combinationIndex) {
   print('Processing combination:', combinationIndex + 1, 'of', totalCombinations, 
         '- WeekFreq:', weekFreq, 'YearFreq:', yearFreq);
   
-  var result = processSelectedMask(2023, 3, yearFreq, weekFreq);
+  var result = processSelectedMask(2023, 5, yearFreq, weekFreq);
   
-  if (result && result.floodResults) {
-    calculateTPRandFPRAsync(result.floodResults, processedGTImage, weekFreq, yearFreq, function(metrics) {
-      if (metrics) {
-        rocResults.push(metrics);
-        print('Combination', combinationIndex + 1, 'complete - TPR:', metrics.TPR.toFixed(4), 'FPR:', metrics.FPR.toFixed(4));
-      } else {
-        print('Failed to calculate metrics for combination', combinationIndex + 1);
-      }
+  // if (result && result.floodResults) {
+  //   calculateTPRandFPRAsync(result.floodResults, processedGTImage, weekFreq, yearFreq, function(metrics) {
+  //     if (metrics) {
+  //       rocResults.push(metrics);
+  //       print('Combination', combinationIndex + 1, 'complete - TPR:', metrics.TPR.toFixed(4), 'FPR:', metrics.FPR.toFixed(4));
+  //     } else {
+  //       print('Failed to calculate metrics for combination', combinationIndex + 1);
+  //     }
       
-      // Process next combination only after current one is complete
-      processNextCombination(combinationIndex + 1);
-    });
-  } else {
-    print('No results for combination', combinationIndex + 1, '- WeekFreq:', weekFreq, 'YearFreq:', yearFreq);
-    // Continue to next combination immediately if no processing needed
-    processNextCombination(combinationIndex + 1);
+  //     // Process next combination only after current one is complete
+  //     processNextCombination(combinationIndex + 1);
+  //   });
+  // } else {
+  //   print('No results for combination', combinationIndex + 1, '- WeekFreq:', weekFreq, 'YearFreq:', yearFreq);
+  //   // Continue to next combination immediately if no processing needed
+  //   processNextCombination(combinationIndex + 1);
+  // }
+  
+  if(result && result.floodResults){
+      processNextCombination(combinationIndex + 1);  
   }
 }
 
