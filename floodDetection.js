@@ -8,13 +8,13 @@ var CONFIG = {
   monsoonEnd: 10,   // Inclusive end month
   
   // Classification thresholds
-  threshold: -16,           // SAR backscatter threshold in dB to identify water
-  perennialThreshold: 0.9,  // 90% frequency across all years to be 'perennial'
-  weekFreq: 0.6,            // 60% historical frequency for a bi-week to be 'seasonal'
-  yearFreq: 0.8,            // 80% frequency in a single year to be 'new perennial'
+  threshold: -16,           
+  perennialThreshold: 0.9,  
+  weekFreq: 0.6,            
+  yearFreq: 0.9,            
   
   // Processing parameters
-  minAreaSqm: 100000,
+  minAreaSqm: 200000,
   regionBoundsSize: 0, // Set to 0 to use full AOI bounds
   
   // Export parameters
@@ -279,8 +279,11 @@ function processSelectedMask(selectedYear, selectedBiWeek, exportResults) {
       
       var seasonalCondition = unclassified
         .and(currentWaterMask.eq(1))
-        .and(waterFreqThisBiWeek.gte(CONFIG.weekFreq))
-        .and(waterFreqThisYear.lt(CONFIG.yearFreq));
+        .and
+        (
+            (waterFreqThisBiWeek.gte(CONFIG.weekFreq).and(waterFreqThisYear.lt(CONFIG.yearFreq)))
+            .or(waterFreqThisBiWeek.lte(CONFIG.weekFreq).and(waterFreqThisYear.gt(CONFIG.yearFreq)))
+        );
         
       var floodCondition = unclassified
         .and(currentWaterMask.eq(1))
@@ -288,7 +291,7 @@ function processSelectedMask(selectedYear, selectedBiWeek, exportResults) {
         
       var newPerennialCondition = unclassified
         .and(currentWaterMask.eq(1))
-        .and(waterFreqThisYear.gte(CONFIG.yearFreq));
+        .and(waterFreqThisYear.gte(CONFIG.yearFreq)).and(waterFreqThisBiWeek.gte(CONFIG.weekFreq));
   
       var temporaryNonWater = unclassified.and(currentWaterMask.eq(0));
   
@@ -346,6 +349,9 @@ function createFloodWaterVectors(classificationImage, year, biWeek, exportResult
   
 
   var floodMask = classificationImage.eq(3).or(classificationImage.eq(4)).selfMask();
+  // var floodMask = classificationImage.eq(3).selfMask();
+  
+  
   var smudgedMask = floodMask.focal_max({ radius: 25, units: 'meters' }).selfMask();
 
   var floodVectors = smudgedMask.reduceToVectors({
