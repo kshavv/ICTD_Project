@@ -14,7 +14,7 @@ var CONFIG = {
   yearFreq: 0.3,
   
   // Processing parameters
-  minAreaSqm: 50000,
+  minAreaSqm: 100000,
   regionBoundsSize: 0,
   
   // Export parameters
@@ -25,19 +25,23 @@ var CONFIG = {
   
   // Batch processing mode
   batchMode: true,
-
-  batchWeekFreq: [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9],
-  batchYearFreq: [0.8]
-  // batchWeekFreq: [0.2,0.3,0.6,0.7],
-  // batchYearFreq: [0.2,0.3,0.6,0.7]
+  // batchWeekFreq: [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
+  // batchYearFreq: [0.5,0.6,0.7,0.8,0.9,1.0]
+  batchWeekFreq: [0.2,0.3,0.6],
+  batchYearFreq: [0.2,0.3,0.6]
 };
 
+//=========================================================
 // Global variables for ROC analysis
 var rocResults = [];
 var processedCombinations = 0;
 var totalCombinations = CONFIG.batchWeekFreq.length * CONFIG.batchYearFreq.length;
 var parameterCombinations = [];
+//=========================================================
 
+
+//========================PROCESSING Ground Truth=================================
+//=========================================================
 // Pre-generate all parameter combinations
 function generateParameterCombinations() {
   parameterCombinations = [];
@@ -122,17 +126,30 @@ function processGroundTruth(gtImage, minAreaSqm) {
   // Step 7: Return the final raster image.
   return finalGTRaster;
 }
-processedGTImage = processGroundTruth(gt1, 500000);
+processedGTImage = processGroundTruth(gt1, 300000);
+//================================================================================
 
 
+
+
+//================================================================================
 // ==================== SETUP AOI====================
+//================================================================================
 // Define AOI from processed GT image
 var aoi = processedGTImage.geometry(); // Uses exact extent of GT raster
-Map.centerObject(aoi, 10);
+Map.centerObject(aoi);
+//================================================================================
+//================================================================================
 
 
 
-//************************collect the biweekly images*********************************//
+
+//================================================================================
+//===========================DATA COLLECTION=====================================
+//================================================================================
+/**
+ * Generates a list of bi-weekly start dates for a given year's monsoon season.
+ */
 function biWeeklyMasks(year) {
   year = ee.Number(year);
   var start = ee.Date.fromYMD(year, CONFIG.monsoonStart, 1);
@@ -232,6 +249,10 @@ var yearsEE = ee.List(CONFIG.years);
 // Collect bi-weekly masks for all years
 var biWeeklyMasksByYear = yearsEE.map(biWeeklyMasks);
 print('Data collection initialized for years:', CONFIG.years);
+//================================================================================
+//================================================================================
+//================================================================================
+
 
 
 /**
@@ -453,7 +474,7 @@ function processNextCombination(combinationIndex) {
   if (combinationIndex >= parameterCombinations.length) {
     // All combinations processed, generate ROC curve
     print('All combinations processed. Generating ROC curve...');
-    // generateROCCurve();
+    generateROCCurve();
     return;
   }
   
@@ -466,23 +487,23 @@ function processNextCombination(combinationIndex) {
   
   var result = processSelectedMask(2023, 5, yearFreq, weekFreq);
   
-  // if (result && result.floodResults) {
-  //   calculateTPRandFPRAsync(result.floodResults, processedGTImage, weekFreq, yearFreq, function(metrics) {
-  //     if (metrics) {
-  //       rocResults.push(metrics);
-  //       print('Combination', combinationIndex + 1, 'complete - TPR:', metrics.TPR.toFixed(4), 'FPR:', metrics.FPR.toFixed(4));
-  //     } else {
-  //       print('Failed to calculate metrics for combination', combinationIndex + 1);
-  //     }
+  if (result && result.floodResults) {
+    calculateTPRandFPRAsync(result.floodResults, processedGTImage, weekFreq, yearFreq, function(metrics) {
+      if (metrics) {
+        rocResults.push(metrics);
+        print('Combination', combinationIndex + 1, 'complete - TPR:', metrics.TPR.toFixed(4), 'FPR:', metrics.FPR.toFixed(4));
+      } else {
+        print('Failed to calculate metrics for combination', combinationIndex + 1);
+      }
       
-  //     // Process next combination only after current one is complete
-  //     processNextCombination(combinationIndex + 1);
-  //   });
-  // } else {
-  //   print('No results for combination', combinationIndex + 1, '- WeekFreq:', weekFreq, 'YearFreq:', yearFreq);
-  //   // Continue to next combination immediately if no processing needed
-  //   processNextCombination(combinationIndex + 1);
-  // }
+      // Process next combination only after current one is complete
+      processNextCombination(combinationIndex + 1);
+    });
+  } else {
+    print('No results for combination', combinationIndex + 1, '- WeekFreq:', weekFreq, 'YearFreq:', yearFreq);
+    // Continue to next combination immediately if no processing needed
+    processNextCombination(combinationIndex + 1);
+  }
   
   if(result && result.floodResults){
       processNextCombination(combinationIndex + 1);  
