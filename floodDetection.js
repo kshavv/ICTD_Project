@@ -1,3 +1,5 @@
+var gt = ee.Image("projects/ee-mtpictd-dev/assets/kerala_new_GT");
+
 // ==================== CONFIGURATION PARAMETERS ====================
 var CONFIG = {
   // Time parameters
@@ -9,7 +11,7 @@ var CONFIG = {
   threshold: -16,           // SAR backscatter threshold in dB to identify water
   perennialThreshold: 0.9,  // 90% frequency across all years to be 'perennial'
   weekFreq: 0.6,            // 60% historical frequency for a bi-week to be 'seasonal'
-  yearFreq: 0.8,            // 80% frequency in a single year to be 'new perennial'
+  yearFreq: 0.5,            // 80% frequency in a single year to be 'new perennial'
   
   // Processing parameters
   minAreaSqm: 200000,
@@ -46,7 +48,9 @@ function setupRegion() {
     aoi = region.geometry().centroid().buffer(CONFIG.regionBoundsSize / 2).bounds();
     print('Using centered export box of size (m):', CONFIG.regionBoundsSize);
   } else {
-    aoi = region; //return the entire region
+    // aoi = region; //return the entire region
+    aoi = gt.geometry();
+    // aoi = gt;
     print('Using default AOI bounds for export.');
   }
   
@@ -84,7 +88,8 @@ function s1CollectionForPeriod(start, end) {
     .filter(ee.Filter.eq('instrumentMode', 'IW'))
     .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
     .select(['VV'])
-    .map(function(img) { return img.clip(aoi.geometry()); });
+    // .map(function(img) { return img.clip(aoi.geometry()); });
+    .map(function(img) { return img.clip(aoi); });
 }
 
 /**
@@ -121,7 +126,7 @@ function createBiWeeklyMasksForYear(year) {
         'year': year,
         'biweek_index': biWkNum,
         'system:time_start': w0.millis()
-      }).clip(aoi.geometry());
+      }).clip(aoi); //debug (original .clip(aoi.geometry())) -- key::geometry
     })
   );
 }
@@ -174,7 +179,7 @@ function classifyPerennialAndNonWater(allMasksAllYears) {
     .rename('classification');
     
   return {
-    base: baseCls.clip(aoi.geometry()),
+    base: baseCls.clip(aoi), //debug (original .clip(aoi.geometry())) -- key::geometry
     freq: freq
   };
 }
@@ -256,9 +261,9 @@ function processSelectedMask(selectedYear, selectedBiWeek, exportResults) {
 
     // If the 'bands' list exists and is not empty, the classification was successful.
     if (bands && bands.length > 0) {
-      // var floodResults = createFloodWaterVectors(finalClassification, selectedYear, selectedBiWeek, exportResults);
+      var floodResults = createFloodWaterVectors(finalClassification, selectedYear, selectedBiWeek, exportResults);
       if (!CONFIG.batchMode) {
-        Map.layers().set(1, ui.Map.Layer(finalClassification.clip(aoi.geometry()), {
+        Map.layers().set(1, ui.Map.Layer(finalClassification.clip(aoi), {//debug (original .clip(aoi.geometry())) -- key::geometry
           palette: ['000000', '0000FF', '00FF00', 'FFFF00', 'FF0000'],
           min: 0, max: 4
         }, 'Water Classification'));
@@ -283,18 +288,12 @@ function processSelectedMask(selectedYear, selectedBiWeek, exportResults) {
 function createFloodWaterVectors(classificationImage, year, biWeek, exportResults) {
   exportResults = exportResults || false;
   
-  if (!CONFIG.batchMode) {
-    Map.centerObject(aoi, 10);
-  }
 
-  // Create a mask for flood (4) and seasonal (3) water
   var floodMask = classificationImage.eq(3).or(classificationImage.eq(4)).selfMask();
-  
-  // Use focal_max to connect nearby pixels and smooth edges before vectorizing
   var smudgedMask = floodMask.focal_max({ radius: 25, units: 'meters' }).selfMask();
 
   var floodVectors = smudgedMask.reduceToVectors({
-    geometry: aoi.geometry(),
+    geometry: aoi, //debug (original .clip(aoi.geometry())) -- key::geometry
     scale: 30,
     geometryType: 'polygon',
     maxPixels: 1e13
@@ -309,14 +308,14 @@ function createFloodWaterVectors(classificationImage, year, biWeek, exportResult
   var filteredVectors = floodVectors.filter(ee.Filter.gte('area_m2', CONFIG.minAreaSqm));
   print('Filtered flood/seasonal polygons:', filteredVectors.size());
   
-  // Convert the final filtered vectors back to a raster image
-  var finalFloodRaster = ee.Image(0).byte().paint({
-    featureCollection: filteredVectors,
-    color: 1
-  }).clip(aoi.geometry());
+  // // Convert the final filtered vectors back to a raster image
+  // var finalFloodRaster = ee.Image(0).byte().paint({
+  //   featureCollection: filteredVectors,
+  //   color: 1
+  // }).clip(aoi.geometry());
 
   if (!CONFIG.batchMode) {
-    Map.addLayer(finalFloodRaster.selfMask(), {palette: ['#FF5733']}, 'Final Flood Raster');
+    Map.addLayer(filteredVectors, {palette: ['#FF5733']}, 'Final Flood Raster');
   }
 
   // Export if requested
@@ -325,7 +324,7 @@ function createFloodWaterVectors(classificationImage, year, biWeek, exportResult
   }
 
   return {
-    raster: finalFloodRaster
+    vectors: filteredVectors
   };
 }
 
