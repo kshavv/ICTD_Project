@@ -37,6 +37,7 @@ var rocResults = [];
 var processedCombinations = 0;
 var totalCombinations = CONFIG.batchWeekFreq.length * CONFIG.batchYearFreq.length;
 var parameterCombinations = [];
+
 // Pre-generate all parameter combinations
 function generateParameterCombinations() {
   parameterCombinations = [];
@@ -99,54 +100,34 @@ function processGroundTruth(gtImage, minAreaSqm) {
     color: 1
   }).clip(processingGeom);
   
-  // Visualize: 0 = black (non-flooded), 1 = green (flooded)
-  Map.addLayer(filteredVectors, 
-              {min: 0, max: 1, palette: ['#000000', '#00FF00']}, 
-              'Final GT Raster');
+
 
   var rasterFileName = 'GT_flood_raster_';
   var rasterDescription = 'GT_Flood_Raster_';
 
-  return finalGTRaster;
+  return filteredVectors;
 }
-processedGTImage = processGroundTruth(gt3, 300000);
+
+var gt = gt3;
+processedGTImage = processGroundTruth(gt, 300000);
+
+  // Visualize: 0 = black (non-flooded), 1 = green (flooded)
+Map.addLayer(processedGTImage, 
+              {min: 0, max: 1, palette: ['#000000', '#00FF00']}, 
+              'Final GT Raster');
 //================================================================================
 //================================================================================
 //================================================================================
+
+
+//no prob uptill here ------------------------------------------------------------------- 
 
 
 //================================================================================
 // ==================== SETUP AOI====================
 //================================================================================
-// Define AOI from processed GT image
-// function setupRegion() {
-//   var districts = ee.FeatureCollection("FAO/GAUL/2015/level2");
-//   var region = districts.filter(ee.Filter.and(
-//     ee.Filter.eq("ADM1_NAME", "Kerala"),
-//       ee.Filter.or(
-//       ee.Filter.eq("ADM2_NAME", "Ernakulam"),
-//       ee.Filter.eq("ADM2_NAME", "Kottayam"),
-//       ee.Filter.eq("ADM2_NAME", "Alappuzha"),
-//       ee.Filter.eq("ADM2_NAME", "Pattanamtitta")
-//     )
-//   ));
 
-//   var aoi;
-//   if (CONFIG.regionBoundsSize) { //clip the boundary based on the clipping box
-//     aoi = region.geometry().centroid().buffer(CONFIG.regionBoundsSize / 2).bounds();
-//     print('Using centered export box of size (m):', CONFIG.regionBoundsSize);
-//   } else {
-//     // aoi = region; //return the entire region
-//     aoi = processedGTImage.geometry(); 
-//     // aoi = gt;
-//     print('Using default AOI bounds for export.');
-//   }
-  
-//   return aoi;
-// }
-
-// Initialize AOI
-var aoi = processedGTImage.geometry();
+var aoi = gt.geometry();
 Map.centerObject(aoi,10);
 Map.addLayer(aoi, {}, 'AOI');
 
@@ -160,8 +141,8 @@ Map.addLayer(aoi, {}, 'AOI');
 //===========================DATA COLLECTION=====================================
 //================================================================================
 /**
- * Generates a list of bi-weekly start dates for a given year's monsoon season.
- **/
+* Generates a list of bi-weekly start dates for a given year's monsoon season.
+**/
 function listBiWeekStarts(year) {
   year = ee.Number(year);
   var start = ee.Date.fromYMD(year, CONFIG.monsoonStart, 1);
@@ -173,8 +154,8 @@ function listBiWeekStarts(year) {
 }
 
 /**
- * Retrieves Sentinel-1 imagery for a specific period and clips it to the AOI.
- **/
+* Retrieves Sentinel-1 imagery for a specific period and clips it to the AOI.
+**/
 function s1CollectionForPeriod(start, end) {
   return ee.ImageCollection('COPERNICUS/S1_GRD')
     .filterBounds(aoi)
@@ -187,11 +168,11 @@ function s1CollectionForPeriod(start, end) {
 }
 
 /**
- * Creates bi-weekly water masks for a single year.
- * If a bi-week has no S1 images, it creates a fully masked image (a data gap).
- * @param {ee.Number|number} year The year to process.
- * @return {ee.ImageCollection} The collection of bi-weekly water masks.
- */
+* Creates bi-weekly water masks for a single year.
+* If a bi-week has no S1 images, it creates a fully masked image (a data gap).
+* @param {ee.Number|number} year The year to process.
+* @return {ee.ImageCollection} The collection of bi-weekly water masks.
+*/
 function createBiWeeklyMasksForYear(year) {
   year = ee.Number(year);
   var start = ee.Date.fromYMD(year, CONFIG.monsoonStart, 1);
@@ -226,8 +207,8 @@ function createBiWeeklyMasksForYear(year) {
 }
 
 /**
- * Builds a single ImageCollection containing all bi-weekly masks from all years.
- */
+* Builds a single ImageCollection containing all bi-weekly masks from all years.
+*/
 function buildAllYearsMasks() {
   var allImagesList = ee.List(CONFIG.years).map(function(y) {
     // For each year, get the collection and convert it to a list of images.
@@ -253,11 +234,11 @@ function buildAllYearsMasks() {
 //================================================================================
 
 /**
- * STEP 1: Classifies pixels as perennial water or permanent non-water
- * based on the entire historical dataset.
- * @param {ee.ImageCollection} allMasksAllYears - Collection from buildAllYearsMasks().
- * @return {Object} An object containing the base classification and frequency info.
- */
+* STEP 1: Classifies pixels as perennial water or permanent non-water
+* based on the entire historical dataset.
+* @param {ee.ImageCollection} allMasksAllYears - Collection from buildAllYearsMasks().
+* @return {Object} An object containing the base classification and frequency info.
+*/
 function classifyPerennialAndNonWater(allMasksAllYears) {
   // Count how many valid (unmasked) observations exist for each pixel
   var validCount = allMasksAllYears
@@ -289,12 +270,12 @@ function classifyPerennialAndNonWater(allMasksAllYears) {
 }
 
 /**
- * STEP 2: Performs the final classification for a selected year and bi-week.
- * Classifies the remaining pixels into seasonal, flood, or temporary non-water.
- * This is the main function triggered by the UI.
- */
-function processSelectedMask(selectedYear, selectedBiWeek, exportResults) {
-  exportResults = exportResults || false;
+* STEP 2: Performs the final classification for a selected year and bi-week.
+* Classifies the remaining pixels into seasonal, flood, or temporary non-water.
+* This is the main function triggered by the UI.
+*/
+function processSelectedMask(selectedYear, selectedBiWeek,yearFreq,weekFreq) {
+  exportResults = false;
   
   var selectedYearMasks = createBiWeeklyMasksForYear(selectedYear);
   
@@ -303,8 +284,6 @@ function processSelectedMask(selectedYear, selectedBiWeek, exportResults) {
     .filter(ee.Filter.eq('biweek_index', selectedBiWeek))
     .first());
     
-  // Use ee.Algorithms.If to handle cases where no image is found server-side.
-  // This entire block remains on the server.
   var classificationResult = ee.Algorithms.If(
     currentWaterMask, // Condition: checks if currentWaterMask is not null
     
@@ -329,17 +308,17 @@ function processSelectedMask(selectedYear, selectedBiWeek, exportResults) {
         .and(currentWaterMask.eq(1))
         .and
         (
-            (waterFreqThisBiWeek.gte(CONFIG.weekFreq).and(waterFreqThisYear.lt(CONFIG.yearFreq)))
-            .or(waterFreqThisBiWeek.lte(CONFIG.weekFreq).and(waterFreqThisYear.gt(CONFIG.yearFreq)))
+            (waterFreqThisBiWeek.gte(weekFreq).and(waterFreqThisYear.lt(yearFreq)))
+            .or(waterFreqThisBiWeek.lte(weekFreq).and(waterFreqThisYear.gt(yearFreq)))
         );
         
       var floodCondition = unclassified
         .and(currentWaterMask.eq(1))
-        .and(waterFreqThisBiWeek.lt(CONFIG.weekFreq));
+        .and(waterFreqThisBiWeek.lt(weekFreq));
         
       var newPerennialCondition = unclassified
         .and(currentWaterMask.eq(1))
-        .and(waterFreqThisYear.gte(CONFIG.yearFreq)).and(waterFreqThisBiWeek.gte(CONFIG.weekFreq));
+        .and(waterFreqThisYear.gte(yearFreq)).and(waterFreqThisBiWeek.gte(weekFreq));
   
       var temporaryNonWater = unclassified.and(currentWaterMask.eq(0));
   
@@ -368,7 +347,7 @@ function processSelectedMask(selectedYear, selectedBiWeek, exportResults) {
 
     // If the 'bands' list exists and is not empty, the classification was successful.
     if (bands && bands.length > 0) {
-      var floodResults = createFloodWaterVectors(finalClassification, selectedYear, selectedBiWeek, exportResults);
+      var floodResultsVector = createFloodWaterVectors(finalClassification, selectedYear, selectedBiWeek, exportResults);
       if (!CONFIG.batchMode) {
         Map.layers().set(1, ui.Map.Layer(finalClassification.clip(aoi), {//debug (original .clip(aoi.geometry())) -- key::geometry
           palette: ['000000', '0000FF', '00FF00', 'FFFF00', 'FF0000'],
@@ -387,8 +366,8 @@ function processSelectedMask(selectedYear, selectedBiWeek, exportResults) {
 
 
 /**
- * Converts flood and seasonal water classes to vector polygons, filters by area, and exports.
- */
+* Converts flood and seasonal water classes to vector polygons, filters by area, and exports.
+*/
 function createFloodWaterVectors(classificationImage, year, biWeek, exportResults) {
   exportResults = exportResults || false;
   
@@ -436,8 +415,8 @@ function createFloodWaterVectors(classificationImage, year, biWeek, exportResult
 }
 
 /**
- * Handles the export tasks to Google Drive or Earth Engine Assets.
- */
+* Handles the export tasks to Google Drive or Earth Engine Assets.
+*/
 function exportFloodResults(classification, floodRaster, year, biWeek) {
   var dateString = year + '_biweek_' + biWeek;
   
@@ -553,7 +532,9 @@ function processNextCombination(combinationIndex) {
   print('Processing combination:', combinationIndex + 1, 'of', totalCombinations, 
         '- WeekFreq:', weekFreq, 'YearFreq:', yearFreq);
   
-  var result = processSelectedMask(2023, 5, yearFreq, weekFreq);
+  
+  //processSelectedMasks(selectedYear,selectedWeek,yearFreq,weekFreq)
+  var result = processSelectedMask(2018, 5, yearFreq, weekFreq);
   
   if (result && result.floodResults) {
     calculateTPRandFPRAsync(result.floodResults, processedGTImage, weekFreq, yearFreq, function(metrics) {
@@ -662,10 +643,3 @@ function generateROCCurve() {
 print('Initializing ROC analysis with', totalCombinations, 'parameter combinations...');
 print('This will process combinations sequentially to avoid race conditions.');
 runBatchProcessing();
-
-
-
-
-
-
-
