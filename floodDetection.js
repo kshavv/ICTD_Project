@@ -1,4 +1,4 @@
-var gt = ee.Image("projects/ee-mtpictd-dev/assets/kerala_new_GT");
+
 
 // ==================== CONFIGURATION PARAMETERS ====================
 var CONFIG = {
@@ -11,10 +11,10 @@ var CONFIG = {
   threshold: -16,           // SAR backscatter threshold in dB to identify water
   perennialThreshold: 0.9,  // 90% frequency across all years to be 'perennial'
   weekFreq: 0.6,            // 60% historical frequency for a bi-week to be 'seasonal'
-  yearFreq: 0.5,            // 80% frequency in a single year to be 'new perennial'
+  yearFreq: 0.8,            // 80% frequency in a single year to be 'new perennial'
   
   // Processing parameters
-  minAreaSqm: 200000,
+  minAreaSqm: 100000,
   regionBoundsSize: 0, // Set to 0 to use full AOI bounds
   
   // Export parameters
@@ -28,6 +28,62 @@ var CONFIG = {
   batchYears: [2023, 2024], // Years to process in batch mode
   batchBiWeeks: [3, 4, 5] // Bi-weeks to process in batch mode
 };
+
+
+//====================PROCESSING THE GT IMAGE ======================
+var processedGTImage;
+function processGroundTruth(gtImage, minAreaSqm) {
+
+  Map.clear();
+  var processingGeom = gtImage.geometry();
+
+  Map.centerObject(processingGeom, 12);
+  
+  // Set default export scale if not provided
+  var exportScale = 30;
+
+  // Isolate flood pixels (value is 1 for ground truth).
+  var floodMask = gtImage.eq(1).selfMask();
+  
+  // The 'focal_max' (smudging) step is skipped for ground truth data
+  // to preserve its original accuracy.
+  // Step 2: Vectorize the mask to create polygons from the raster data.
+  var floodVectors = floodMask.reduceToVectors({
+    geometry: processingGeom, // Use the image's geometry
+    scale: exportScale, // Use the export scale for vectorization
+    geometryType: 'polygon',
+    labelProperty: 'class',
+    maxPixels: 1e13
+  });
+  
+  // Step 3: Compute the area of each polygon and store it as a property.
+  floodVectors = floodVectors.map(function(feature) {
+    var area = feature.geometry().area({maxError: 1});
+    return feature.set({'area_m2': area});
+  });
+
+  // Step 4: Filter out polygons that are smaller than the specified minimum area.
+  var filteredVectors = floodVectors.filter(ee.Filter.gte('area_m2', minAreaSqm));
+
+  
+  // Step 5: Convert the filtered vectors back into a raster image.
+  // Rasterize filteredVectors: flood areas get value 1, background is 0
+  var finalGTRaster = ee.Image(0).byte().paint({
+    featureCollection: filteredVectors,
+    color: 1
+  }).clip(processingGeom);
+  
+  // Visualize: 0 = black (non-flooded), 1 = green (flooded)
+  Map.addLayer(filteredVectors, 
+              {min: 0, max: 1, palette: ['#000000', '#00FF00']}, 
+              'Final GT Raster');
+
+  var rasterFileName = 'GT_flood_raster_';
+  var rasterDescription = 'GT_Flood_Raster_';
+
+  return finalGTRaster;
+}
+processedGTImage = processGroundTruth(gt, CONFIG.minAreaSqm);
 
 
 // ==================== REGION SETUP ====================
@@ -49,7 +105,7 @@ function setupRegion() {
     print('Using centered export box of size (m):', CONFIG.regionBoundsSize);
   } else {
     // aoi = region; //return the entire region
-    aoi = gt.geometry();
+    aoi = processedGTImage.geometry(); 
     // aoi = gt;
     print('Using default AOI bounds for export.');
   }
