@@ -1,16 +1,15 @@
 // ==================== CONFIGURATION PARAMETERS ====================
 var CONFIG = {
-
   // Time parameters
   years: [2018, 2019, 2020, 2021, 2022, 2023, 2024],
-  monsoonStart: 5,
-  monsoonEnd: 10,
+  monsoonStart: 5, // Inclusive start month
+  monsoonEnd: 10,   // Inclusive end month
   
   // Classification thresholds
-  threshold: -16,
-  perennialThreshold: 1,
-  weekFreq: 0.1,
-  yearFreq: 0.1,
+  threshold: -16,           // SAR backscatter threshold in dB to identify water
+  perennialThreshold: 0.9,  // 90% frequency across all years to be 'perennial'
+  weekFreq: 0.6,            // 60% historical frequency for a bi-week to be 'seasonal'
+  yearFreq: 0.8,            // 80% frequency in a single year to be 'new perennial'
   
   // Processing parameters
   minAreaSqm: 200000,
@@ -19,8 +18,8 @@ var CONFIG = {
   // Export parameters
   exportToAsset: false,
   exportToDrive: true,
-  assetPath: "users/your_username/flood_maps/",
-  driveFolder: "keshav_sparsh/FloodMaps",
+  // assetPath: "users/your_username/flood_maps/",
+  driveFolder: "GEE_Flood_Exports",
   
   // Batch processing mode
   batchMode: false, // Set to true for automated batch processing
@@ -29,11 +28,8 @@ var CONFIG = {
 };
 
 
-
-
 // ==================== REGION SETUP ====================
 function setupRegion() {
-  
   var districts = ee.FeatureCollection("FAO/GAUL/2015/level2");
   var region = districts.filter(ee.Filter.and(
     ee.Filter.eq("ADM1_NAME", "Kerala"),
@@ -45,9 +41,8 @@ function setupRegion() {
     )
   ));
 
-
   var aoi;
-  if (CONFIG.regionBoundsSize) {//clip the boundary based on the clipping box
+  if (CONFIG.regionBoundsSize) { //clip the boundary based on the clipping box
     aoi = region.geometry().centroid().buffer(CONFIG.regionBoundsSize / 2).bounds();
     print('Using centered export box of size (m):', CONFIG.regionBoundsSize);
   } else {
@@ -58,410 +53,306 @@ function setupRegion() {
   return aoi;
 }
 
-
 // Initialize AOI
 var aoi = setupRegion();
 Map.centerObject(aoi, 10);
-
-// Display AOI boundary
-var empty = ee.Image().byte();
-var aoiOutline = empty.paint({
-  featureCollection: ee.FeatureCollection(aoi),
-  color: 1,
-  width: 3
-});
-
-// Render on map
 Map.addLayer(aoi, {}, 'AOI');
 
 
-
-
-// ==================== SERVER-SIDE DATA COLLECTION FUNCTIONS ====================
+// ==================== DATA COLLECTION (LOGIC FROM SCRIPT 2) ====================
 
 /**
- * Returns Image Collection of water mask over the entire monsoon season for a given year.
- * - Uses a threshold to mask out water and non-water.
- * - If more than 1 image exists in a 2-week period, it takes the mean.
- * - **If no image exists for a bi-week, it uses the image from the most recent previous bi-week that had data.**
- * - If the very first bi-week has no data, it creates a zero-mask as a fallback.
+ * Generates a list of bi-weekly start dates for a given year's monsoon season.
+ */
+function listBiWeekStarts(year) {
+  year = ee.Number(year);
+  var start = ee.Date.fromYMD(year, CONFIG.monsoonStart, 1);
+  var end = ee.Date.fromYMD(year, CONFIG.monsoonEnd, 1).advance(1, 'month').advance(-1, 'day');
+  var nBi = end.difference(start, 'week').divide(2).ceil();
+  return ee.List.sequence(0, nBi.subtract(1)).map(function(i) {
+    return start.advance(ee.Number(i).multiply(2), 'week');
+  });
+}
+
+/**
+ * Retrieves Sentinel-1 imagery for a specific period and clips it to the AOI.
+ */
+function s1CollectionForPeriod(start, end) {
+  return ee.ImageCollection('COPERNICUS/S1_GRD')
+    .filterBounds(aoi)
+    .filterDate(start, end)
+    .filter(ee.Filter.eq('instrumentMode', 'IW'))
+    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+    .select(['VV'])
+    .map(function(img) { return img.clip(aoi.geometry()); });
+}
+
+/**
+ * Creates bi-weekly water masks for a single year.
+ * If a bi-week has no S1 images, it creates a fully masked image (a data gap).
  * @param {ee.Number|number} year The year to process.
  * @return {ee.ImageCollection} The collection of bi-weekly water masks.
  */
-function biWeeklyMasks(year) {
+function createBiWeeklyMasksForYear(year) {
   year = ee.Number(year);
   var start = ee.Date.fromYMD(year, CONFIG.monsoonStart, 1);
-  var end = ee.Date.fromYMD(year, CONFIG.monsoonEnd, 30);
-  
-  var nBiWks = end.difference(start, 'week').divide(2).floor();
+  var starts = listBiWeekStarts(year);
 
-  var starts = ee.List.sequence(0, nBiWks.subtract(1))
-    .map(function(i) {
-      return start.advance(ee.Number(i).multiply(2), 'week');
-    });
+  return ee.ImageCollection(
+    starts.map(function(w0) {
+      w0 = ee.Date(w0);
+      var w1 = w0.advance(2, 'week');
 
-  // Initial state for the iteration: an empty collection and an empty "last valid image".
-  var initialState = ee.Dictionary({
-    'collection': ee.ImageCollection([]),
-    'lastImage': ee.Image().select() // An image with no bands is our placeholder for "none yet"
-  });
+      var s1col = s1CollectionForPeriod(w0, w1);
+      var hasData = s1col.size().gt(0);
 
-  // The function that will be applied to each bi-week start date.
-  var accumulate = function(w0, previousState) {
-    // Cast the inputs to the correct types.
-    w0 = ee.Date(w0);
-    previousState = ee.Dictionary(previousState);
-    var collection = ee.ImageCollection(previousState.get('collection'));
-    var lastImage = ee.Image(previousState.get('lastImage'));
+      // If data exists, compute the mean. Otherwise, create a masked image.
+      var biweeklyMean = ee.Algorithms.If(
+        hasData, 
+        s1col.mean(), 
+        ee.Image(0).updateMask(ee.Image(0)) // Properly masked image for gaps
+      );
+      biweeklyMean = ee.Image(biweeklyMean);
 
-    var w1 = w0.advance(2, 'week');
+      var mask = biweeklyMean.lt(CONFIG.threshold).rename('water');
+      var biWkNum = w0.difference(start, 'week').divide(2).floor();
 
-    // Get the S1 collection for the current bi-week.
-    var col = ee.ImageCollection('COPERNICUS/S1_GRD')
-      .filterBounds(aoi)
-      .filterDate(w0, w1)
-      .filter(ee.Filter.eq('instrumentMode','IW'))
-      .filter(ee.Filter.listContains('transmitterReceiverPolarisation','VV'))
-      .select('VV');
-
-    var isCollectionEmpty = col.size().eq(0);
-    
-    // If the collection is NOT empty, the current image is the mean.
-    // If it IS empty, we carry forward the last valid image.
-    var newMean = col.mean();
-    var imageToProcess = ee.Image(ee.Algorithms.If(isCollectionEmpty, lastImage, newMean));
-
-    // **Edge Case Handler**: If imageToProcess has no bands, it means this is the
-    // very first bi-week and it was empty. In this case, we fall back to a zero image.
-    // Otherwise, we use the valid new image or the valid carried-over image.
-    var finalImage = ee.Image(ee.Algorithms.If(
-        imageToProcess.bandNames().size().eq(0),
-        ee.Image(0), // Fallback for the very first step
-        imageToProcess
-    ));
-
-    // Create the mask from the determined image (new, carried-over, or fallback).
-    var mask = finalImage.lt(CONFIG.threshold).unmask(0);
-    var biWkNum = w0.difference(start, 'week').divide(2).floor();
-
-    var newMask = mask
-      .rename("water")
-      .set({
+      return mask.set({
         'year': year,
-        'biweek': biWkNum,
-        'system:time_start': w0.millis(),
-        'has_data': ee.Algorithms.If(isCollectionEmpty, 0, 1) // Note: this now means "had new data this period"
-      })
-      .clip(aoi);
+        'biweek_index': biWkNum,
+        'system:time_start': w0.millis()
+      }).clip(aoi.geometry());
+    })
+  );
+}
 
-    // Add the new mask to our collection.
-    var newCollection = collection.merge(ee.ImageCollection([newMask]));
+/**
+ * Builds a single ImageCollection containing all bi-weekly masks from all years.
+ */
+function buildAllYearsMasks() {
+  var allImagesList = ee.List(CONFIG.years).map(function(y) {
+    // For each year, get the collection and convert it to a list of images.
+    // 100 is a safe upper limit for the number of bi-weeks in a monsoon season.
+    return createBiWeeklyMasksForYear(y).toList(100);
+  }).flatten(); // Flatten the list of lists into a single list of images.
+  
+  // Create a single collection from the flat list of all images.
+  return ee.ImageCollection(allImagesList);
+}
+
+
+// ==================== CLASSIFICATION (LOGIC FROM SCRIPT 2) ====================
+
+/**
+ * STEP 1: Classifies pixels as perennial water or permanent non-water
+ * based on the entire historical dataset.
+ * @param {ee.ImageCollection} allMasksAllYears - Collection from buildAllYearsMasks().
+ * @return {Object} An object containing the base classification and frequency info.
+ */
+function classifyPerennialAndNonWater(allMasksAllYears) {
+  // Count how many valid (unmasked) observations exist for each pixel
+  var validCount = allMasksAllYears
+    .map(function(img) { return img.mask().rename('m'); })
+    .reduce(ee.Reducer.sum())
+    .unmask(0); // Ensure a valid image even if there are no observations
+
+  // Sum the water presence (where water=1)
+  var waterPresenceSum = allMasksAllYears.reduce(ee.Reducer.sum())
+    .unmask(0);
+
+  // Calculate frequency: sum of water / number of valid observations
+  var freq = waterPresenceSum.divide(validCount.add(1e-10)) // avoid division by zero
+    .updateMask(validCount.gt(0));
+
+  var perennial = freq.gte(CONFIG.perennialThreshold);
+  var nonWater = freq.eq(0);
+
+  // Create base classification: 1 for perennial, 2 for non-water, 0 for others
+  var baseCls = ee.Image(0)
+    .where(perennial, 1)
+    .where(nonWater, 2)
+    .rename('classification');
     
-    // Update the "lastImage" state ONLY if we got new data this period.
-    var newLastImage = ee.Image(ee.Algorithms.If(isCollectionEmpty, lastImage, newMean));
-
-    // Return the new state for the next iteration.
-    return ee.Dictionary({
-      'collection': newCollection,
-      'lastImage': newLastImage
-    });
+  return {
+    base: baseCls.clip(aoi.geometry()),
+    freq: freq
   };
-
-  // Run the iteration over all bi-week start dates.
-  var finalState = ee.Dictionary(starts.iterate(accumulate, initialState));
-  
-  // Extract the final collection from the state dictionary.
-  return ee.ImageCollection(finalState.get('collection'));
 }
 
-var yearsEE = ee.List(CONFIG.years);
-
-// Collect bi-weekly masks for all years
-var biWeeklyMasksByYear = yearsEE.map(biWeeklyMasks);
-print('Data collection initialized for years:', CONFIG.years);
-
-Map.addLayer(ee.ImageCollection(biWeeklyMasksByYear.get(5)).first(), {
-  min: 0,
-  max: 2,
-  palette: ['black', 'blue', '#00FF00']
-}, "mask");
-
-
-
-
-
 /**
-***************DATA IS COLLECTED AT THIS POINT. STARTING THE CLASSIFICATION***********************
-**/
-/**
- * STEP 1...
- * Classifying into perennial, non water and unclassified pixel.
- * This classification is done using the entire data collected and can be updated using the CONFIG variable
- * There will be a further classification post selecting the year and week.
- * That classification will further classify the unclassified pixels into perennial,flood,seasonal for the given year and week
- * 
- **/
-function classifyPerennialAndNonWater() {
-  var totalBiWeeks = yearsEE.map(function(year) {
-    var start = ee.Date.fromYMD(year, CONFIG.monsoonStart, 1);
-    var end = ee.Date.fromYMD(year, CONFIG.monsoonEnd, 30);
-    return end.difference(start, 'week').divide(2).floor();
-  }).reduce(ee.Reducer.sum());
-
-  var waterPresenceSum = ee.Image(0);
-  for (var i = 0; i < CONFIG.years.length; i++) {
-    var yearCollection = ee.ImageCollection(biWeeklyMasksByYear.get(i));
-    waterPresenceSum = waterPresenceSum.add(
-      ee.Algorithms.If(
-        yearCollection.size().gt(0),
-        yearCollection.reduce(ee.Reducer.sum()).unmask(),
-        ee.Image(0).toByte()
-      )
-    );
-  }
-
-  var waterPresenceProportion = waterPresenceSum.divide(ee.Image.constant(totalBiWeeks));
-  
-  var perennialWater = waterPresenceProportion.gte(CONFIG.perennialThreshold).rename('perennial_water');
-  var nonWater = waterPresenceProportion.eq(0).rename('non_water');
-
-  var classification = ee.Image(0)
-    .where(perennialWater, 1)
-    .where(nonWater, 2);
-
-  return classification.clip(aoi);
-}
-
-// Initial classification
-var perennialAndNonWaterClassification = classifyPerennialAndNonWater();
-//visualizing the init classification
-// Visualization parameters
-var classVis = {
-  min: 0,
-  max: 2,
-  palette: [
-    'black', // 0 = neither perennial water nor non-water
-    'blue',  // 1 = perennial water
-    '#00FF00' // 2 = non-water
-  ]
-};
-
-// Add to the map
-Map.addLayer(perennialAndNonWaterClassification, classVis, 'Perennial & Non-water Classification');
-print('Initial classification complete');
-
-
-
-/**
-*STEP 2...
-* creating a function for classifying the unclassified pixels
-* This function will be triggered when the inputs are provided and generates a fully classified flood map for 
-* the provided period
-* 
-**/
+ * STEP 2: Performs the final classification for a selected year and bi-week.
+ * Classifies the remaining pixels into seasonal, flood, or temporary non-water.
+ * This is the main function triggered by the UI.
+ */
 function processSelectedMask(selectedYear, selectedBiWeek, exportResults) {
   exportResults = exportResults || false;
   
-  var selectedYearIndex = CONFIG.years.indexOf(selectedYear);
-  var selectedYearCollection = ee.ImageCollection(biWeeklyMasksByYear.get(selectedYearIndex));
-
-  var selectedMask = selectedYearCollection
-    .filterMetadata('biweek', 'equals', selectedBiWeek)
-    .first();
+  var selectedYearMasks = createBiWeeklyMasksForYear(selectedYear);
+  
+  // This may be null if no image matches the filter
+  var currentWaterMask = ee.Image(selectedYearMasks
+    .filter(ee.Filter.eq('biweek_index', selectedBiWeek))
+    .first());
     
-  print('selected Year', selectedYear);
-  print('bi week ', selectedBiWeek);
+  // Use ee.Algorithms.If to handle cases where no image is found server-side.
+  // This entire block remains on the server.
+  var classificationResult = ee.Algorithms.If(
+    currentWaterMask, // Condition: checks if currentWaterMask is not null
     
-  if (selectedMask) {
+    // --- IF TRUE: An image was found, so run the full classification ---
+    (function() {
+      var validCountYear = selectedYearMasks.map(function(img) { return img.mask(); })
+        .reduce(ee.Reducer.sum()).unmask(0);
+      var waterSumYear = selectedYearMasks.reduce(ee.Reducer.sum()).unmask(0);
+      var waterFreqThisYear = waterSumYear.divide(validCountYear.add(1e-10))
+        .updateMask(validCountYear.gt(0));
 
-      // ----- Added: Compute totalMonsoonBiWeeks same way as old code -----
-    var monsoonBiWeeks = ee.List(CONFIG.years).map(function(year) {
-      year = ee.Number(year); // ensure it's an ee.Number
-      var start = ee.Date.fromYMD(year, CONFIG.monsoonStart, 1);
-      var end = ee.Date.fromYMD(year, CONFIG.monsoonEnd, 30);
-      return end.difference(start, 'week').divide(2).floor();
-    });
-    
-    var totalMonsoonBiWeeks = ee.Number(monsoonBiWeeks.reduce(ee.Reducer.sum()));
-
-    // -------------------------------------------------------------------
-
-    var waterFrequencyThisBiWeek = ee.ImageCollection(yearsEE.map(function(year) {
-      var yearIndex = CONFIG.years.indexOf(year);
-      var yearCollection = ee.ImageCollection(biWeeklyMasksByYear.get(yearIndex));
-      var biWeekImage = yearCollection.filterMetadata('biweek', 'equals', selectedBiWeek).first();
-      return ee.Algorithms.If(biWeekImage, ee.Image(biWeekImage), ee.Image(0).selfMask());
-    })).reduce(ee.Reducer.sum()).divide(CONFIG.years.length);
-
-
-    // ----- Changed: Use totalMonsoonBiWeeks instead of selectedYearCollection.size() -----
-    var waterFrequencyThisYear = selectedYearCollection.reduce(ee.Reducer.sum())
-      .divide(totalMonsoonBiWeeks);
-    // -------------------------------------------------------------------------------------
-
-    var weeklyNonWaterMask = selectedMask.eq(0).rename('weekly_non_water');
-    var unclassifiedPixels = perennialAndNonWaterClassification.eq(0);
-    var newNonWaterPixels = unclassifiedPixels.and(weeklyNonWaterMask);
-
-    var alreadyClassified = perennialAndNonWaterClassification;
-    alreadyClassified = alreadyClassified.where(newNonWaterPixels, 2);
-
-    var seasonalWater = waterFrequencyThisBiWeek.gte(CONFIG.weekFreq)
-      .and(waterFrequencyThisYear.lt(CONFIG.yearFreq))
-      .rename('seasonal_water')
-      .and(alreadyClassified.eq(0));
+      var biweekAcrossYears = allMasks.filter(ee.Filter.eq('biweek_index', selectedBiWeek));
+      var validCountBi = biweekAcrossYears.map(function(i) { return i.mask(); })
+        .reduce(ee.Reducer.sum()).unmask(0);
+      var waterSumBi = biweekAcrossYears.reduce(ee.Reducer.sum()).unmask(0);
+      var waterFreqThisBiWeek = waterSumBi.divide(validCountBi.add(1e-10))
+        .updateMask(validCountBi.gt(0));
       
-    var floodWater = waterFrequencyThisBiWeek.lt(CONFIG.weekFreq)
-      .and(waterFrequencyThisYear.lt(CONFIG.yearFreq))
-      .rename('flood_water')
-      .and(alreadyClassified.eq(0).and(seasonalWater.not()));
+      var unclassified = baseClassification.eq(0);
       
-    var newPerennialWater = waterFrequencyThisYear.gte(CONFIG.yearFreq)
-      .rename('new_seasonal_water')
-      .and(alreadyClassified.eq(0).and(seasonalWater.not().and(floodWater.not())));
-
-    var finalClassification = alreadyClassified
-      .where(seasonalWater, 3)
-      .where(floodWater, 4)
-      .where(newPerennialWater, 5);
+      var seasonalCondition = unclassified
+        .and(currentWaterMask.eq(1))
+        .and(waterFreqThisBiWeek.gte(CONFIG.weekFreq))
+        .and(waterFreqThisYear.lt(CONFIG.yearFreq));
+        
+      var floodCondition = unclassified
+        .and(currentWaterMask.eq(1))
+        .and(waterFreqThisBiWeek.lt(CONFIG.weekFreq));
+        
+      var newPerennialCondition = unclassified
+        .and(currentWaterMask.eq(1))
+        .and(waterFreqThisYear.gte(CONFIG.yearFreq));
+  
+      var temporaryNonWater = unclassified.and(currentWaterMask.eq(0));
+  
+      return baseClassification
+        .where(temporaryNonWater, 2)
+        .where(seasonalCondition, 3)
+        .where(floodCondition, 4)
+        .where(newPerennialCondition, 1);
+    })(),
     
-    // Create flood water vectors
-    var floodResults = createFloodWaterVectors(finalClassification, selectedYear, selectedBiWeek, exportResults);
+    // --- IF FALSE: No image was found, return a placeholder ---
+    null // Return null to signify no data
+  );
 
+  // Cast the server-side result to an ee.Image. If it was null, this will be a
+  // computed object that represents null.
+  var finalClassification = ee.Image(classificationResult);
 
-    
-    // Update map layer
-    if (!CONFIG.batchMode) {
-      Map.layers().set(1, ui.Map.Layer(finalClassification.clip(aoi), {
-        palette: ['000000', '0000FF', '00FF00', 'yellow', 'red', '72A1ED'],
-        min: 0,
-        max: 5
-      }, 'Water Classification'));
+  // Now, evaluate a property of the result (like its band names) to check if it's a
+  // valid image on the client side.
+  finalClassification.bandNames().evaluate(function(bands, error) {
+    if (error) {
+      print('An error occurred during classification:', error);
+      return;
     }
 
-    return {
-      classification: finalClassification,
-      // floodVectors: floodResults.vectors,
-      floodRaster: floodResults.raster
-    };
-
-  } else {
-    print('No data found for the selected year and bi-week.');
-    if (!CONFIG.batchMode) {
-      Map.layers().set(1, ui.Map.Layer(ee.Image().rename('Water Classification'), {}, 'Water Classification', false));
+    // If the 'bands' list exists and is not empty, the classification was successful.
+    if (bands && bands.length > 0) {
+      // var floodResults = createFloodWaterVectors(finalClassification, selectedYear, selectedBiWeek, exportResults);
+      if (!CONFIG.batchMode) {
+        Map.layers().set(1, ui.Map.Layer(finalClassification.clip(aoi.geometry()), {
+          palette: ['000000', '0000FF', '00FF00', 'FFFF00', 'FF0000'],
+          min: 0, max: 4
+        }, 'Water Classification'));
+      }
+    } else {
+      // If 'bands' is null or empty, it means no image was created (no data).
+      print('No data found for the selected year and bi-week.');
+      if (!CONFIG.batchMode) {
+        Map.layers().set(1, ui.Map.Layer(ee.Image(), {}, 'No Data', false));
+      }
     }
-    return null;
-  }
+  });
 }
 
 
-//***************DEFINING THE HELPER FUNCTIONS **********************************
 
+// ==================== VECTORIZATION & EXPORT (FROM SCRIPT 1) ====================
 
 /**
- * Converts the class of pixel into vector polygons
- * then filters out the polygons based on  min area
- * Params - classificationImage (the final classified image)
- *        - floodClassValue (the class to vectorize)
- *
- **/
+ * Converts flood and seasonal water classes to vector polygons, filters by area, and exports.
+ */
 function createFloodWaterVectors(classificationImage, year, biWeek, exportResults) {
   exportResults = exportResults || false;
   
   if (!CONFIG.batchMode) {
-    Map.clear();
     Map.centerObject(aoi, 10);
   }
 
+  // Create a mask for flood (4) and seasonal (3) water
   var floodMask = classificationImage.eq(3).or(classificationImage.eq(4)).selfMask();
   
-  var smudgedMask = floodMask.focal_max({
-    radius: 25,
-    units: 'meters'
-  }).selfMask();
+  // Use focal_max to connect nearby pixels and smooth edges before vectorizing
+  var smudgedMask = floodMask.focal_max({ radius: 25, units: 'meters' }).selfMask();
 
   var floodVectors = smudgedMask.reduceToVectors({
-    geometry: aoi,
+    geometry: aoi.geometry(),
     scale: 30,
     geometryType: 'polygon',
-    labelProperty: 'class',
     maxPixels: 1e13
   });
   
-  print('Number of polygons BEFORE area filtering:', floodVectors.size());
-
+  // Map over the vectors to calculate the area of each polygon
   floodVectors = floodVectors.map(function(feature) {
-    var area = feature.geometry().area({maxError: 1});
-    return feature.set({'area_m2': area});
+    return feature.set({'area_m2': feature.geometry().area({maxError: 1})});
   });
 
+  // Filter the polygons by the minimum area threshold
   var filteredVectors = floodVectors.filter(ee.Filter.gte('area_m2', CONFIG.minAreaSqm));
+  print('Filtered flood/seasonal polygons:', filteredVectors.size());
   
-  print('Number of polygons AFTER area filtering:', filteredVectors.size());
-  
-  // if (!CONFIG.batchMode) {
-  //   Map.addLayer(filteredVectors, {color: 'red'}, 'Filtered Flood Polygons');
-  // }
-
-  var emptyImage = classificationImage.multiply(0).byte();
-  var finalFloodRaster = emptyImage.paint({
+  // Convert the final filtered vectors back to a raster image
+  var finalFloodRaster = ee.Image(0).byte().paint({
     featureCollection: filteredVectors,
     color: 1
-  }).clip(aoi);
+  }).clip(aoi.geometry());
 
   if (!CONFIG.batchMode) {
-    // Map.addLayer(finalFloodRaster.selfMask(), {palette: ['#0000FF']}, 'Final Flood Raster (Masked)');
-    Map.addLayer(finalFloodRaster, {min: 0, max: 1, palette: ['black', 'blue']}, 'Final Flood Raster (No Mask)');
+    Map.addLayer(finalFloodRaster.selfMask(), {palette: ['#FF5733']}, 'Final Flood Raster');
   }
 
   // Export if requested
   if (exportResults || CONFIG.batchMode) {
-    exportFloodResults(classificationImage, finalFloodRaster, filteredVectors, year, biWeek);
+    exportFloodResults(classificationImage, finalFloodRaster, year, biWeek);
   }
 
   return {
-    vectors: filteredVectors,
     raster: finalFloodRaster
   };
 }
 
-
-//helper function for exporting images
-// ==================== SERVER-SIDE EXPORT FUNCTIONS ====================
-function exportFloodResults(classification, floodRaster, floodVectors, year, biWeek) {
+/**
+ * Handles the export tasks to Google Drive or Earth Engine Assets.
+ */
+function exportFloodResults(classification, floodRaster, year, biWeek) {
   var dateString = year + '_biweek_' + biWeek;
-  // var regionString = CONFIG.state + '_' + CONFIG.districts.join('_');
   
   if (CONFIG.exportToDrive) {
-  
-    // Export flood raster
     Export.image.toDrive({
       image: floodRaster,
-      description: 'flood_raster_'  + dateString,
+      description: 'flood_raster_' + dateString,
       folder: CONFIG.driveFolder,
-      fileNamePrefix: 'flood_raster_'  + dateString,
-      region: aoi,
-      scale: classification.projection().nominalScale(),
-      crs: classification.projection(),
+      fileNamePrefix: 'flood_raster_' + dateString,
+      region: aoi.geometry(),
+      scale: 30,
       maxPixels: 1e13
     });
-
-    // Export flood vectors
-    // Export.table.toDrive({
-    //   collection: floodVectors,
-    //   description: 'flood_vectors_' + regionString + '_' + dateString,
-    //   folder: CONFIG.driveFolder,
-    //   fileNamePrefix: 'flood_vectors_' + regionString + '_' + dateString,
-    //   fileFormat: 'SHP'
-    // });
   }
 
   if (CONFIG.exportToAsset) {
     Export.image.toAsset({
       image: classification,
-      description: 'flood_asset_'+ dateString,
-      assetId: CONFIG.assetPath + 'flood_classification_' + regionString + '_' + dateString,
-      region: aoi,
+      description: 'flood_classification_asset_' + dateString,
+      assetId: CONFIG.assetPath + 'flood_classification_' + dateString,
+      region: aoi.geometry(),
       scale: 30,
       maxPixels: 1e13
     });
@@ -470,7 +361,8 @@ function exportFloodResults(classification, floodRaster, floodVectors, year, biW
   print('Export tasks submitted for', year, 'bi-week', biWeek);
 }
 
-// ==================== BATCH PROCESSING FUNCTIONS ====================
+
+// ==================== BATCH PROCESSING (FROM SCRIPT 1) ====================
 function runBatchProcessing() {
   print('Starting batch processing...');
   CONFIG.batchMode = true;
@@ -487,43 +379,47 @@ function runBatchProcessing() {
 }
 
 
-//***************************UI Elements ****************************************//
-// Create UI only if not in batch mode
+// ==================== INITIALIZATION & UI ====================
+
+// --- Main Data Loading ---
+print('Building historical water masks for all years. This may take a moment...');
+var allMasks = buildAllYearsMasks();
+var baseInfo = classifyPerennialAndNonWater(allMasks);
+var baseClassification = baseInfo.base;
+
+Map.addLayer(baseClassification, {
+  min: 0, max: 2, palette: ['black', 'blue', 'green']
+}, 'Base Classification (Perennial/Non-Water)', false);
+print('Base classification complete.');
+
+
+// --- UI Elements ---
 if (!CONFIG.batchMode) {
-  // Main control panel
   var panel = ui.Panel({ style: { width: '350px' } });
   
-  // Year selector
   var yearSelect = ui.Select({
-    items: CONFIG.years.map(function(year) {
-      return { label: String(year), value: year };
-    }),
+    items: CONFIG.years.map(String).map(function(y) { return {label: y, value: parseInt(y, 10)}; }),
     placeholder: 'Select Year'
   });
 
-  // Bi-week selector  
   var biWeekSelect = ui.Select({
-    items: [0,1,2,3,4,5,6,7,8].map(function(week) {
-      return { label: 'Bi-Week ' + String(week), value: week };
-    }),
+    items: ee.List.sequence(0, 12).getInfo().map(function(w) { return {label: 'Bi-Week ' + w, value: w}; }),
     placeholder: 'Select Bi-Week'
   });
 
-  // Interactive display button
-  var displayButton = ui.Button({ 
-    label: 'Show Bi-Weekly Water',
+  var displayButton = ui.Button({
+    label: 'Generate Flood Map',
     onClick: function() {
       var selectedYear = yearSelect.getValue();
       var selectedBiWeek = biWeekSelect.getValue();
       if (selectedYear && selectedBiWeek !== null) {
-        processSelectedMask(selectedYear, selectedBiWeek, true); // set to true if want to export
+        processSelectedMask(selectedYear, selectedBiWeek, false);
       } else {
         print('Please select both year and bi-week');
       }
     }
   });
 
-  // Export button
   var exportButton = ui.Button({
     label: 'Export Current Selection',
     onClick: function() {
@@ -537,87 +433,40 @@ if (!CONFIG.batchMode) {
     }
   });
 
-  // Batch processing button
   var batchButton = ui.Button({
     label: 'Run Batch Processing',
     onClick: runBatchProcessing
   });
 
-
-  // Build panel
   panel.add(ui.Label('Flood Mapping Tool', { fontWeight: 'bold', fontSize: '16px' }));
   panel.add(ui.Label('Select Year and Bi-Week to Display'));
   panel.add(yearSelect);
   panel.add(biWeekSelect);
   panel.add(displayButton);
   panel.add(exportButton);
-  panel.add(ui.Label('Batch Processing', { fontWeight: 'bold', fontSize: '14px' }));
-  panel.add(ui.Label('Process multiple years/bi-weeks automatically', { fontSize: '12px' }));
+  panel.add(ui.Label('Batch Processing', { fontWeight: 'bold', fontSize: '14px', margin: '10px 0 0 0' }));
   panel.add(batchButton);
 
-  // Legend
   var legendPanel = ui.Panel({
     style: { position: 'bottom-left', padding: '8px 15px' }
   });
-  var legendTitle = ui.Label({
-    value: 'Water Classification Legend',
-    style: { fontWeight: 'bold', fontSize: '16px', margin: '0 0 4px 0' }
-  });
-  legendPanel.add(legendTitle);
+  legendPanel.add(ui.Label({
+    value: 'Legend', style: { fontWeight: 'bold', fontSize: '16px', margin: '0 0 4px 0' }
+  }));
   
-  var palette = ['0000FF', '00BB00', 'FFFF00', 'FF0000'];
-  var names = ['Perennial Water', 'Non-Water', 'Seasonal Water', 'Flood Water'];
+  var palette = ['0000FF', '00FF00', 'FFFF00', 'FF0000'];
+  var names = ['1: Perennial Water', '2: Non-Water', '3: Seasonal Water', '4: Flood Water'];
   for (var i = 0; i < palette.length; i++) {
-    var colorBox = ui.Label({
-      style: { backgroundColor: '#' + palette[i], padding: '8px', margin: '0 0 4px 0' }
-    });
-    var description = ui.Label({ 
-      value: names[i], 
-      style: { margin: '0 0 4px 6px' } 
-    });
+    var colorBox = ui.Label({ style: { backgroundColor: '#' + palette[i], padding: '8px', margin: '0 0 4px 0' } });
+    var description = ui.Label({ value: names[i], style: { margin: '0 0 4px 6px' } });
     legendPanel.add(ui.Panel({
       widgets: [colorBox, description],
       layout: ui.Panel.Layout.Flow('horizontal')
     }));
   }
   
-  panel.add(legendPanel);
   ui.root.add(panel);
-  
-  print('UI initialized');
+  Map.add(legendPanel);
+  print('UI initialized.');
 }
-
-
-// ====================FUNCTIONS FOR ANALYSIS AND LOG STATS ====================
-// This section is entirely for debugging and analysis
-
-print('===== Image Collection Statistics =====');
-
-// Use a client-side loop to process and print stats for each year.
-CONFIG.years.forEach(function(year) {
-  
-  // 1. Generate the entire collection for the year.
-  //    This is still a server-side object.
-  var singleYearCollection = biWeeklyMasks(year);
-
-  // 2. Calculate the total number of masks generated for the year.
-  var totalImages = singleYearCollection.size();
-  
-  // 3. Calculate how many masks had new data.
-  //    We sum the 'has_data' property (1 for data, 0 for empty).
-  var imagesWithData = singleYearCollection.aggregate_sum('has_data');
-  
-  // 4. The number of empty masks is the total minus those with data.
-  var emptyImages = totalImages.subtract(imagesWithData);
-
-  // 5. Print the server-side objects. GEE will automatically fetch the
-  //    values and display them in the console.
-  print('Year ' + year + ':', {
-    'Total Bi-Weekly Masks': totalImages,
-    'Masks with New Data': imagesWithData,
-    'Empty/Filled Masks': emptyImages
-  });
-});
-
-
 
