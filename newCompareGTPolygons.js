@@ -381,7 +381,7 @@ function createFloodWaterVectors(classificationImage, year, biWeek, exportResult
 
   var floodVectors = smudgedMask.reduceToVectors({
     geometry: aoi, //debug (original .clip(aoi.geometry())) -- key::geometry
-    scale: 30,
+    scale: 150,
     geometryType: 'polygon',
     maxPixels: 1e13
   });
@@ -470,58 +470,82 @@ var baseClassification = baseInfo.base;
 //====================ADDITIONAL FUNCTIONS FOR ROC CURVE ANALYSIS=================
 //================================================================================
 
-// Compare polygon collections by 50% overlap (or any overlapThreshold you pass).
-// predictedVectors, groundTruthVectors: ee.FeatureCollection (polygons)
-// overlapThreshold: number between 0 and 1 (default 0.5)
-// weekFreq/yearFreq optional strings to include in layer names
-// Compare two vector datasets and compute TPR/FPR using 50% overlap rule
-function calculateTPRandFPRVector(predictedVectors, groundTruthVectors, overlapThreshold) {
-  // Count polygons
-  var nPred = predictedVectors.size();
-  var nGT = groundTruthVectors.size();
+// overlapThreshold default 0.5, weekFreq/yearFreq optional labels, callback(result)
+function calculateTPRandFPRFromVectors(predictedVectors, gtVectors, weekFreq, yearFreq, callback) {
+  var predictedRaster = ee.Image(0).byte().paint({
+    featureCollection: predictedVectors,
+    color: 1
+  }).clip(aoi);
 
-  // Each GT polygon: find if overlapped >= threshold by any predicted polygon
-  var gtMatched = groundTruthVectors.map(function(gt) {
-    var gtGeom = gt.geometry();
-    var gtArea = gtGeom.area(1);
-    
-    // Compute maximum intersection area with predicted polygons
-    var overlap = predictedVectors.map(function(pred) {
-      var inter = gtGeom.intersection(pred.geometry(), 1);
-      var interArea = inter.area(1);
-      return pred.set('interArea', interArea);
-    }).aggregate_array('interArea').reduce(ee.Reducer.max());
-    
-    var overlapRatio = ee.Number(overlap).divide(gtArea);
-    return gt.set('matched', overlapRatio.gte(overlapThreshold));
-  });
-  
-  var matchedGT = gtMatched.filter(ee.Filter.eq('matched', true)).size();
-  var tpr = ee.Number(matchedGT).divide(nGT);
+  var gtRaster = ee.Image(0).byte().paint({
+    featureCollection: gtVectors,
+    color: 1
+  }).clip(aoi);
 
-  // Each predicted polygon: find if overlapped >= threshold by any GT polygon
-  var predMatched = predictedVectors.map(function(pred) {
-    var predGeom = pred.geometry();
-    var predArea = predGeom.area(1);
-    
-    var overlap = groundTruthVectors.map(function(gt) {
-      var inter = predGeom.intersection(gt.geometry(), 1);
-      var interArea = inter.area(1);
-      return gt.set('interArea', interArea);
-    }).aggregate_array('interArea').reduce(ee.Reducer.max());
-    
-    var overlapRatio = ee.Number(overlap).divide(predArea);
-    return pred.set('matched', overlapRatio.gte(overlapThreshold));
-  });
-  
-  var unmatchedPred = predMatched.filter(ee.Filter.eq('matched', false)).size();
-  var fpr = ee.Number(unmatchedPred).divide(nPred);
+  var truePositives  = predictedRaster.and(gtRaster);
+  var falsePositives = predictedRaster.and(gtRaster.not());
+  var falseNegatives = gtRaster.and(predictedRaster.not());
+  var trueNegatives  = predictedRaster.not().and(gtRaster.not());
 
-  return ee.Dictionary({
-    TPR: tpr,
-    FPR: fpr,
-    numPredicted: nPred,
-    numGroundTruth: nGT
+  var combined = ee.Image([
+    truePositives.rename('TP'),
+    falsePositives.rename('FP'),
+    falseNegatives.rename('FN'),
+    trueNegatives.rename('TN')
+  ]);
+
+  print('🧩 Starting reduceRegion for WeekFreq:', weekFreq, 'YearFreq:', yearFreq);
+
+  combined.reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: aoi,
+    scale: 30,
+    maxPixels: 1e13
+  }).evaluate(function(result, error) {
+    // Guard against missing callbacks or broken result
+    if (error) {
+      print('❌ Error calculating metrics for weekFreq:', weekFreq, 'yearFreq:', yearFreq);
+      print('Error details:', error);
+      callback(null);
+      return;
+    }
+
+    if (!result) {
+      print('⚠️ Empty result for weekFreq:', weekFreq, 'yearFreq:', yearFreq);
+      callback(null);
+      return;
+    }
+
+    try {
+      print('🧮 Raw reduceRegion output:', result);
+
+      var tp = result.TP || 0;
+      var fp = result.FP || 0;
+      var fn = result.FN || 0;
+      var tn = result.TN || 0;
+
+      var tpr = (tp + fn) > 0 ? tp / (tp + fn) : 0;
+      var fpr = (fp + tn) > 0 ? fp / (fp + tn) : 0;
+
+      print('📊 Computed metrics:',
+            'TP:', tp, 'FP:', fp, 'FN:', fn, 'TN:', tn,
+            '→ TPR:', tpr.toFixed(3), 'FPR:', fpr.toFixed(3));
+
+      callback({
+        TPR: tpr,
+        FPR: fpr,
+        weekFreq: weekFreq,
+        yearFreq: yearFreq,
+        TP: tp,
+        FP: fp,
+        FN: fn,
+        TN: tn
+      });
+
+    } catch (e) {
+      print('🚨 Exception during metric calculation:', e);
+      callback(null);
+    }
   });
 }
 
@@ -531,59 +555,49 @@ function calculateTPRandFPRVector(predictedVectors, groundTruthVectors, overlapT
 // Sequential processing function to avoid race conditions
 function processNextCombination(combinationIndex) {
   if (combinationIndex >= parameterCombinations.length) {
-    // All combinations processed, generate ROC curve
-    print('All combinations processed. Generating ROC curve...');
+    print('✅ All combinations processed. Generating ROC curve...');
     generateROCCurve();
     return;
   }
-  
+
   var combo = parameterCombinations[combinationIndex];
   var weekFreq = combo.weekFreq;
   var yearFreq = combo.yearFreq;
-  
-  print('Processing combination:', combinationIndex + 1, 'of', totalCombinations, 
-        '- WeekFreq:', weekFreq, 'YearFreq:', yearFreq);
-  
-  
-  //processSelectedMasks(selectedYear,selectedWeek,yearFreq,weekFreq)
-  var result = processSelectedMask(2018, 4, yearFreq, weekFreq);
-  var layerName = 'Flood polygons' + '_Yfreq' + yearFreq + '_Wfreq' + weekFreq;
 
-  Map.addLayer(result, {}, layerName);
-  
-  if (result) {
-    
-     // Calculate overlap metrics on the server
-    var metrics = calculateTPRandFPRVector(result, processedGTImage, 0.5);
-    
-    // Bring server-side dictionary to client to store in JS array
-    metrics.evaluate(function(clientMetrics) {
-      if (clientMetrics) {
-        clientMetrics.weekFreq = weekFreq;
-        clientMetrics.yearFreq = yearFreq;
-        rocResults.push(clientMetrics);
-        print('Combination', combinationIndex + 1, 
-              '- TPR:', clientMetrics.TPR ? clientMetrics.TPR.toFixed(4) : 'NaN',
-              'FPR:', clientMetrics.FPR ? clientMetrics.FPR.toFixed(4) : 'NaN',
-              'Pred:', clientMetrics.numPredicted,
-              'GT:', clientMetrics.numGroundTruth);
-      } else {
-        print('⚠️ Failed to compute metrics for combination', combinationIndex + 1);
-      }
-    
-      processNextCombination(combinationIndex + 1);
-    });
-    
-    
-  } else {
-    print('No results for combination', combinationIndex + 1, '- WeekFreq:', weekFreq, 'YearFreq:', yearFreq);
-    // Continue to next combination immediately if no processing needed
+  print('▶️ Processing combination:', combinationIndex + 1, 'of', totalCombinations, 
+        '- WeekFreq:', weekFreq, 'YearFreq:', yearFreq);
+
+  // Get predicted polygons (server-side object)
+  var result = processSelectedMask(2018, 3, yearFreq, weekFreq);
+
+  if (!result) {
+    print('⚠️ No result for', weekFreq, yearFreq);
     processNextCombination(combinationIndex + 1);
+    return;
   }
+
+  // Display on map for debug
+  var layerName = 'Flood polygons_Y' + yearFreq + '_W' + weekFreq;
+  Map.addLayer(result, {}, layerName);
+
+  // Defer metric computation
+  print('⏳ Calculating TPR/FPR for:', weekFreq, yearFreq);
+
+  calculateTPRandFPRFromVectors(result, processedGTImage, weekFreq, yearFreq, function(metrics) {
+    print('📬 Returned from TPR/FPR callback for combo', combinationIndex + 1);
   
-  if(result && result.floodResults){//update thsi once we are getting results
-      // processNextCombination(combinationIndex + 1);  
-  }
+    if (metrics) {
+      rocResults.push(metrics);
+      print('✅ Done:', combinationIndex + 1,
+            '- TPR:', metrics.TPR.toFixed(3),
+            'FPR:', metrics.FPR.toFixed(3));
+    } else {
+      print('❌ Failed metrics for:', combinationIndex + 1);
+    }
+  
+    print('➡️ Moving to next combination...');
+    processNextCombination(combinationIndex + 1);
+  });
 }
 
 // Batch processing function
