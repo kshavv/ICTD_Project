@@ -9,7 +9,7 @@ var CONFIG = {
   
   // Classification threshold6
   threshold: -16,
-  perennialThreshold: 0.95,
+  perennialThreshold: 0.90,
   weekFreq: 0.3,
   yearFreq: 0.3,
   
@@ -27,8 +27,8 @@ var CONFIG = {
   batchMode: true,
   // batchWeekFreq: [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
   // batchYearFreq: [0.5,0.6,0.7,0.8,0.9,1.0]
-  batchWeekFreq: [0.2,0.3,0.6],
-  batchYearFreq: [0.2,0.3,0.6]
+  batchWeekFreq: [0.2,0.9],
+  batchYearFreq: [0.2]
 };
 
 //=========================================================
@@ -274,17 +274,23 @@ function classifyPerennialAndNonWater(allMasksAllYears) {
 * Classifies the remaining pixels into seasonal, flood, or temporary non-water.
 * This is the main function triggered by the UI.
 */
-function processSelectedMask(selectedYear, selectedBiWeek,yearFreq,weekFreq) {
-  exportResults = false;
+function processSelectedMask(selectedYear, selectedBiWeek, yearFreq, weekFreq) {
+  var exportResults = false;
   
   var selectedYearMasks = createBiWeeklyMasksForYear(selectedYear);
-  
-  // This may be null if no image matches the filter
   var currentWaterMask = ee.Image(selectedYearMasks
     .filter(ee.Filter.eq('biweek_index', selectedBiWeek))
     .first());
+  
+  
+  var seasonStartDate = ee.Date.fromYMD(ee.Number(selectedYear), CONFIG.monsoonStart, 1);
+  // Calculate the start date of the specific bi-week.
+  var biWeekStartDate = seasonStartDate.advance(ee.Number(selectedBiWeek).multiply(2), 'week');
+  
+  // Print the date to the console. GEE will automatically format it.
+  print('Processing classification for date starting:', biWeekStartDate);
     
-  var classificationResult = ee.Algorithms.If(
+var classificationResult = ee.Algorithms.If(
     currentWaterMask, // Condition: checks if currentWaterMask is not null
     
     // --- IF TRUE: An image was found, so run the full classification ---
@@ -332,36 +338,31 @@ function processSelectedMask(selectedYear, selectedBiWeek,yearFreq,weekFreq) {
     // --- IF FALSE: No image was found, return a placeholder ---
     null // Return null to signify no data
   );
-
-  // Cast the server-side result to an ee.Image. If it was null, this will be a
+  
+    // Cast the server-side result to an ee.Image. If it was null, this will be a
   // computed object that represents null.
   var finalClassification = ee.Image(classificationResult);
 
-  // Now, evaluate a property of the result (like its band names) to check if it's a
-  // valid image on the client side.
-  finalClassification.bandNames().evaluate(function(bands, error) {
-    if (error) {
-      print('An error occurred during classification:', error);
-      return;
-    }
+  // Directly create vectors here (server-side)
+  // Create vectors server-side, with an empty FeatureCollection fallback
+  var floodVectors = ee.FeatureCollection(
+    ee.Algorithms.If(
+      classificationResult,
+      createFloodWaterVectors(finalClassification), // returns ee.FeatureCollection
+      ee.FeatureCollection([]) // fallback if no classification (avoid null)
+    )
+  );
 
-    // If the 'bands' list exists and is not empty, the classification was successful.
-    if (bands && bands.length > 0) {
-      var floodResultsVector = createFloodWaterVectors(finalClassification, selectedYear, selectedBiWeek, exportResults);
-      if (!CONFIG.batchMode) {
-        Map.layers().set(1, ui.Map.Layer(finalClassification.clip(aoi), {//debug (original .clip(aoi.geometry())) -- key::geometry
-          palette: ['000000', '0000FF', '00FF00', 'FFFF00', 'FF0000'],
-          min: 0, max: 4
-        }, 'Water Classification'));
-      }
-    } else {
-      // If 'bands' is null or empty, it means no image was created (no data).
-      print('No data found for the selected year and bi-week.');
-      if (!CONFIG.batchMode) {
-        Map.layers().set(1, ui.Map.Layer(ee.Image(), {}, 'No Data', false));
-      }
-    }
-  });
+  // Optional visualization if not in batch mode
+  if (!CONFIG.batchMode) {
+    Map.layers().set(1, ui.Map.Layer(finalClassification.clip(aoi), {
+      palette: ['000000', '0000FF', '00FF00', 'FFFF00', 'FF0000'],
+      min: 0, max: 4
+    }, 'Water Classification'));
+  }
+
+  // Return the vector result
+  return floodVectors;
 }
 
 
@@ -376,7 +377,7 @@ function createFloodWaterVectors(classificationImage, year, biWeek, exportResult
   // var floodMask = classificationImage.eq(3).selfMask();
   
   
-  var smudgedMask = floodMask.focal_max({ radius: 30, units: 'meters' }).selfMask();
+  var smudgedMask = floodMask.focal_max({ radius: 36, units: 'meters' }).selfMask();
 
   var floodVectors = smudgedMask.reduceToVectors({
     geometry: aoi, //debug (original .clip(aoi.geometry())) -- key::geometry
@@ -392,7 +393,7 @@ function createFloodWaterVectors(classificationImage, year, biWeek, exportResult
 
   // Filter the polygons by the minimum area threshold
   var filteredVectors = floodVectors.filter(ee.Filter.gte('area_m2', CONFIG.minAreaSqm));
-  print('Filtered flood/seasonal polygons:', filteredVectors.size());
+  // print('Filtered flood/seasonal polygons:', filteredVectors.size());
   
   // // Convert the final filtered vectors back to a raster image
   // var finalFloodRaster = ee.Image(0).byte().paint({
@@ -409,9 +410,9 @@ function createFloodWaterVectors(classificationImage, year, biWeek, exportResult
   //   exportFloodResults(classificationImage, finalFloodRaster, year, biWeek);
   // }
 
-  return {
-    vectors: filteredVectors
-  };
+  
+    return filteredVectors;
+  
 }
 
 /**
@@ -469,52 +470,111 @@ var baseClassification = baseInfo.base;
 //====================ADDITIONAL FUNCTIONS FOR ROC CURVE ANALYSIS=================
 //================================================================================
 
-// Function to calculate TPR and FPR that returns a Promise-like structure
-function calculateTPRandFPRAsync(predictedRaster, processedGTImage, weekFreq, yearFreq, callback) {
-  var truePositives = predictedRaster.and(processedGTImage);
-  var falsePositives = predictedRaster.and(processedGTImage.not());
-  var falseNegatives = processedGTImage.and(predictedRaster.not());
-  var trueNegatives = processedGTImage.not().and(predictedRaster.not());
+// Compare polygon collections by 50% overlap (or any overlapThreshold you pass).
+// predictedVectors, groundTruthVectors: ee.FeatureCollection (polygons)
+// overlapThreshold: number between 0 and 1 (default 0.5)
+// weekFreq/yearFreq optional strings to include in layer names
+function calculateVectorTPR_FPR(predictedVectors, groundTruthVectors, overlapThreshold, weekFreq, yearFreq) {
+  overlapThreshold = overlapThreshold === undefined ? 0.5 : overlapThreshold;
+  overlapThreshold = ee.Number(overlapThreshold);
 
-  // Combine all calculations into one reduceRegion call to minimize server requests
-  var combined = ee.Image([
-    truePositives.rename('TP'),
-    falsePositives.rename('FP'), 
-    falseNegatives.rename('FN'),
-    trueNegatives.rename('TN')
-  ]);
+  // Print counts
+  var nPred = predictedVectors.size();
+  var nGT = groundTruthVectors.size();
+  print('Predicted polygon count:', nPred);
+  print('Ground truth polygon count:', nGT);
 
-  combined.reduceRegion({
-    reducer: ee.Reducer.sum(),
-    geometry: aoi,
-    scale: 30,
-    maxPixels: 1e13
-  }).evaluate(function(result, error) {
-    if (error) {
-      print('Error calculating metrics for weekFreq:', weekFreq, 'yearFreq:', yearFreq, error);
-      callback(null);
-    } else {
-      var tp = result.TP;
-      var fp = result.FP;
-      var fn = result.FN;
-      var tn = result.TN;
-      
-      var tpr = tp / (tp + fn);
-      var fpr = fp / (fp + tn);
-      
-      callback({
-        TPR: tpr,
-        FPR: fpr,
-        weekFreq: weekFreq,
-        yearFreq: yearFreq,
-        TP: tp,
-        FP: fp,
-        FN: fn,
-        TN: tn
-      });
-    }
+  // For each predicted polygon: compute total intersection area with all GT polygons
+  var predWithOverlap = predictedVectors.map(function(pred) {
+    pred = ee.Feature(pred);
+    var predGeom = pred.geometry();
+    var predArea = ee.Number(predGeom.area());
+
+    // Build FeatureCollection of intersections (each with property 'area')
+    var intersections = groundTruthVectors.map(function(gt) {
+      gt = ee.Feature(gt);
+      var interGeom = gt.geometry().intersection(predGeom, 1); // maxError = 1 meter
+      return ee.Feature(interGeom).set('area', ee.Number(interGeom.area()));
+    }).filter(ee.Filter.gt('area', 0)); // keep only non-empty intersections
+
+    var overlapArea = ee.Number(intersections.aggregate_sum('area'));
+    var overlapRatio = overlapArea.divide(predArea.add(1e-10)); // avoid divide-by-zero
+
+    return pred.set({
+      'overlapArea': overlapArea,
+      'overlapRatio': overlapRatio,
+      'isTP': overlapRatio.gte(overlapThreshold)
+    });
+  });
+
+  // For each GT polygon: check if it is detected by any predicted polygon (≥ threshold)
+  var gtWithOverlap = groundTruthVectors.map(function(gt) {
+    gt = ee.Feature(gt);
+    var gtGeom = gt.geometry();
+    var gtArea = ee.Number(gtGeom.area());
+
+    var intersections = predictedVectors.map(function(pred) {
+      pred = ee.Feature(pred);
+      var interGeom = pred.geometry().intersection(gtGeom, 1);
+      return ee.Feature(interGeom).set('area', ee.Number(interGeom.area()));
+    }).filter(ee.Filter.gt('area', 0));
+
+    var overlapArea = ee.Number(intersections.aggregate_sum('area'));
+    var overlapRatio = overlapArea.divide(gtArea.add(1e-10));
+
+    return gt.set({
+      'overlapArea': overlapArea,
+      'overlapRatio': overlapRatio,
+      'isDetected': overlapRatio.gte(overlapThreshold)
+    });
+  });
+
+  // Extract TP, FP and FN as FeatureCollections
+  var TP_FC = predWithOverlap.filter(ee.Filter.eq('isTP', true));
+  var FP_FC = predWithOverlap.filter(ee.Filter.eq('isTP', false));
+  var FN_FC = gtWithOverlap.filter(ee.Filter.eq('isDetected', false));
+
+  // Counts (ee.Number)
+  var TP = TP_FC.size();
+  var FP = FP_FC.size();
+  var FN = FN_FC.size();
+
+  // Safe TPR and FPR (handle 0 denominators)
+  var TPR = ee.Algorithms.If(ee.Number(TP).add(FN).eq(0), 0,
+             ee.Number(TP).divide(ee.Number(TP).add(FN)));
+  var FPR = ee.Algorithms.If(ee.Number(FP).add(TP).eq(0), 0,
+             ee.Number(FP).divide(ee.Number(FP).add(TP)));
+
+  // Print summary
+  print('--- Polygon-based overlap metrics (threshold = ' + overlapThreshold.getInfo() + ') ---');
+  print('TP:', TP, ' FP:', FP, ' FN:', FN);
+  print('TPR (recall):', TPR);
+  print('FPR (approx):', FPR);
+
+  // Add layers for quick visual check (names include optional freq info)
+  var tag = (weekFreq ? ('_w' + weekFreq) : '') + (yearFreq ? ('_y' + yearFreq) : '');
+  Map.addLayer(predictedVectors, {color: 'gray'}, 'Predicted (All)' + tag);
+  Map.addLayer(groundTruthVectors, {color: 'orange'}, 'GT (All)' + tag);
+  Map.addLayer(TP_FC, {color: 'green'}, 'TP (pred ∩ GT >= thresh)' + tag);
+  Map.addLayer(FP_FC, {color: 'red'}, 'FP (pred < thresh)' + tag);
+  Map.addLayer(FN_FC, {color: 'blue'}, 'FN (GT undetected)' + tag);
+
+  // Return a server-side dictionary
+  return ee.Dictionary({
+    'predicted_count': nPred,
+    'gt_count': nGT,
+    'TP': TP,
+    'FP': FP,
+    'FN': FN,
+    'TPR': TPR,
+    'FPR': FPR,
+    'overlapThreshold': overlapThreshold,
+    'weekFreq': weekFreq,
+    'yearFreq': yearFreq
   });
 }
+
+
 
 // Sequential processing function to avoid race conditions
 function processNextCombination(combinationIndex) {
@@ -534,10 +594,13 @@ function processNextCombination(combinationIndex) {
   
   
   //processSelectedMasks(selectedYear,selectedWeek,yearFreq,weekFreq)
-  var result = processSelectedMask(2018, 5, yearFreq, weekFreq);
+  var result = processSelectedMask(2018, 4, yearFreq, weekFreq);
+  var layerName = 'Flood polygons' + '_Yfreq' + yearFreq + '_Wfreq' + weekFreq;
+
+  Map.addLayer(result, {}, layerName);
   
-  if (result && result.floodResults) {
-    calculateTPRandFPRAsync(result.floodResults, processedGTImage, weekFreq, yearFreq, function(metrics) {
+  if (result) {
+    calculateVectorTPR_FPR(result, processedGTImage,0.5, function(metrics) {
       if (metrics) {
         rocResults.push(metrics);
         print('Combination', combinationIndex + 1, 'complete - TPR:', metrics.TPR.toFixed(4), 'FPR:', metrics.FPR.toFixed(4));
