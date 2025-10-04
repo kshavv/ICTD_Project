@@ -27,8 +27,8 @@ var CONFIG = {
   batchMode: true,
   // batchWeekFreq: [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
   // batchYearFreq: [0.5,0.6,0.7,0.8,0.9,1.0]
-  batchWeekFreq: [0.2,0.9],
-  batchYearFreq: [0.2]
+  batchWeekFreq: [0.9],
+  batchYearFreq: [0.2,0.5]
 };
 
 //=========================================================
@@ -71,11 +71,13 @@ function processGroundTruth(gtImage, minAreaSqm) {
 
   // Isolate flood pixels (value is 1 for ground truth).
   var floodMask = gtImage.eq(1).selfMask();
-  
+  var smudgedMask = floodMask.focal_max({ radius: 36, units: 'meters' }).selfMask();
   // The 'focal_max' (smudging) step is skipped for ground truth data
   // to preserve its original accuracy.
+  
+  
   // Step 2: Vectorize the mask to create polygons from the raster data.
-  var floodVectors = floodMask.reduceToVectors({
+  var floodVectors = smudgedMask.reduceToVectors({
     geometry: processingGeom, // Use the image's geometry
     scale: exportScale, // Use the export scale for vectorization
     geometryType: 'polygon',
@@ -472,84 +474,90 @@ var baseClassification = baseInfo.base;
 
 // overlapThreshold default 0.5, weekFreq/yearFreq optional labels, callback(result)
 function calculateTPRandFPRFromVectors(predictedVectors, gtVectors, weekFreq, yearFreq, callback) {
-  var predictedRaster = ee.Image(0).byte().paint({
-    featureCollection: predictedVectors,
-    color: 1
-  }).clip(aoi);
+  // Default scale = 30 m if not given
+  var scale =  30;
 
-  var gtRaster = ee.Image(0).byte().paint({
-    featureCollection: gtVectors,
-    color: 1
-  }).clip(aoi);
+  // Use a meter-based projection at desired scale
+  var projection = ee.Projection('EPSG:3857').atScale(scale);
 
-  var truePositives  = predictedRaster.and(gtRaster);
-  var falsePositives = predictedRaster.and(gtRaster.not());
-  var falseNegatives = gtRaster.and(predictedRaster.not());
-  var trueNegatives  = predictedRaster.not().and(gtRaster.not());
+  // Reproject both datasets
+  predictedVectors = predictedVectors.map(function(f) {
+    return f.setGeometry(f.geometry().transform(projection, ee.ErrorMargin(10)));
+  });
+  gtVectors = gtVectors.map(function(f) {
+    return f.setGeometry(f.geometry().transform(projection, ee.ErrorMargin(10)));
+  });
 
-  var combined = ee.Image([
-    truePositives.rename('TP'),
-    falsePositives.rename('FP'),
-    falseNegatives.rename('FN'),
-    trueNegatives.rename('TN')
-  ]);
+  // Log inputs
+  print('🧩 Running metrics at', scale, 'm scale | WeekFreq:', weekFreq, '| YearFreq:', yearFreq);
 
-  print('🧩 Starting reduceRegion for WeekFreq:', weekFreq, 'YearFreq:', yearFreq);
+  // For each predicted polygon, compute overlap with GT polygons
+  var matchedPred = predictedVectors.map(function(pred) {
+    var predGeom = pred.geometry();
+    var predArea = predGeom.area({maxError: 10, proj: projection});
 
-  combined.reduceRegion({
-    reducer: ee.Reducer.sum(),
-    geometry: aoi,
-    scale: 30,
-    maxPixels: 1e13
-  }).evaluate(function(result, error) {
-    // Guard against missing callbacks or broken result
-    if (error) {
-      print('❌ Error calculating metrics for weekFreq:', weekFreq, 'yearFreq:', yearFreq);
-      print('Error details:', error);
-      callback(null);
-      return;
-    }
+    var interArea = gtVectors.map(function(gt) {
+      var inter = predGeom.intersection(gt.geometry(), ee.ErrorMargin(10));
+      var iArea = inter.area({maxError: 10, proj: projection});
+      return gt.set('interArea', iArea);
+    });
 
-    if (!result) {
-      print('⚠️ Empty result for weekFreq:', weekFreq, 'yearFreq:', yearFreq);
-      callback(null);
-      return;
-    }
+    var maxOverlap = interArea.aggregate_max('interArea');
+    var overlapRatio = ee.Number(maxOverlap).divide(predArea);
+    return pred.set('overlap', overlapRatio);
+  });
 
-    try {
-      print('🧮 Raw reduceRegion output:', result);
+  // TP and FP
+  var TP = matchedPred.filter(ee.Filter.gte('overlap', 0.5));
+  var FP = matchedPred.filter(ee.Filter.lt('overlap', 0.5));
 
-      var tp = result.TP || 0;
-      var fp = result.FP || 0;
-      var fn = result.FN || 0;
-      var tn = result.TN || 0;
+  // For GT polygons (find FN)
+  var matchedGT = gtVectors.map(function(gt) {
+    var gtGeom = gt.geometry();
+    var gtArea = gtGeom.area({maxError: 10, proj: projection});
 
-      var tpr = (tp + fn) > 0 ? tp / (tp + fn) : 0;
-      var fpr = (fp + tn) > 0 ? fp / (fp + tn) : 0;
+    var interArea = predictedVectors.map(function(pred) {
+      var inter = gtGeom.intersection(pred.geometry(), ee.ErrorMargin(10));
+      var iArea = inter.area({maxError: 10, proj: projection});
+      return pred.set('interArea', iArea);
+    });
 
-      print('📊 Computed metrics:',
-            'TP:', tp, 'FP:', fp, 'FN:', fn, 'TN:', tn,
-            '→ TPR:', tpr.toFixed(3), 'FPR:', fpr.toFixed(3));
+    var maxOverlap = interArea.aggregate_max('interArea');
+    var overlapRatio = ee.Number(maxOverlap).divide(gtArea);
+    return gt.set('overlap', overlapRatio);
+  });
 
-      callback({
-        TPR: tpr,
-        FPR: fpr,
-        weekFreq: weekFreq,
-        yearFreq: yearFreq,
-        TP: tp,
-        FP: fp,
-        FN: fn,
-        TN: tn
-      });
+  var FN = matchedGT.filter(ee.Filter.lt('overlap', 0.5));
 
-    } catch (e) {
-      print('🚨 Exception during metric calculation:', e);
-      callback(null);
-    }
+  // Counts
+  var tpCount = TP.size();
+  var fpCount = FP.size();
+  var fnCount = FN.size();
+
+  var tpr = tpCount.divide(tpCount.add(fnCount));
+  var fpr = fpCount.divide(fpCount.add(gtVectors.size()));
+
+  // Log results
+  print('📊', 'Scale:', scale, '→ TP:', tpCount, 'FP:', fpCount, 'FN:', fnCount,
+        '| TPR:', tpr, 'FPR:', fpr);
+
+  // Visual layers (optional)
+  Map.addLayer(TP, {color: '00FF00'}, 'TP_' + weekFreq + '_' + yearFreq);
+  Map.addLayer(FP, {color: 'FF0000'}, 'FP_' + weekFreq + '_' + yearFreq);
+  Map.addLayer(FN, {color: '0000FF'}, 'FN_' + weekFreq + '_' + yearFreq);
+
+  // Return metrics
+  callback({
+    TPR: tpr,
+    FPR: fpr,
+    TP: tpCount,
+    FP: fpCount,
+    FN: fnCount,
+    weekFreq: weekFreq,
+    yearFreq: yearFreq,
+    scale: scale
   });
 }
-
-
 
 
 // Sequential processing function to avoid race conditions
@@ -583,20 +591,36 @@ function processNextCombination(combinationIndex) {
   // Defer metric computation
   print('⏳ Calculating TPR/FPR for:', weekFreq, yearFreq);
 
+  // Run the metric calculation
   calculateTPRandFPRFromVectors(result, processedGTImage, weekFreq, yearFreq, function(metrics) {
-    print('📬 Returned from TPR/FPR callback for combo', combinationIndex + 1);
-  
     if (metrics) {
-      rocResults.push(metrics);
-      print('✅ Done:', combinationIndex + 1,
-            '- TPR:', metrics.TPR.toFixed(3),
-            'FPR:', metrics.FPR.toFixed(3));
+      // Bring server-side numbers to client
+      ee.Dictionary({
+        TPR: metrics.TPR,
+        FPR: metrics.FPR
+      }).evaluate(function(clientMetrics) {
+        var tpr = clientMetrics.TPR || 0;
+        var fpr = clientMetrics.FPR || 0;
+  
+        rocResults.push({
+          TPR: tpr,
+          FPR: fpr,
+          weekFreq: metrics.weekFreq,
+          yearFreq: metrics.yearFreq
+        });
+  
+        print('✅ Done:', combinationIndex + 1,
+              '- TPR:', tpr.toFixed(3),
+              'FPR:', fpr.toFixed(3));
+  
+        print('➡️ Moving to next combination...');
+        processNextCombination(combinationIndex + 1);
+      });
+  
     } else {
       print('❌ Failed metrics for:', combinationIndex + 1);
+      processNextCombination(combinationIndex + 1);
     }
-  
-    print('➡️ Moving to next combination...');
-    processNextCombination(combinationIndex + 1);
   });
 }
 
