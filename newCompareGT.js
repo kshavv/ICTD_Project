@@ -381,7 +381,7 @@ function createFloodWaterVectors(classificationImage, year, biWeek, exportResult
 
   var floodVectors = smudgedMask.reduceToVectors({
     geometry: aoi, //debug (original .clip(aoi.geometry())) -- key::geometry
-    scale: 30,
+    scale: 150,
     geometryType: 'polygon',
     maxPixels: 1e13
   });
@@ -470,111 +470,59 @@ var baseClassification = baseInfo.base;
 //====================ADDITIONAL FUNCTIONS FOR ROC CURVE ANALYSIS=================
 //================================================================================
 
-// Compare polygon collections by 50% overlap (or any overlapThreshold you pass).
-// predictedVectors, groundTruthVectors: ee.FeatureCollection (polygons)
-// overlapThreshold: number between 0 and 1 (default 0.5)
-// weekFreq/yearFreq optional strings to include in layer names
-function calculateVectorTPR_FPR(predictedVectors, groundTruthVectors, overlapThreshold, weekFreq, yearFreq) {
-  overlapThreshold = overlapThreshold === undefined ? 0.5 : overlapThreshold;
-  overlapThreshold = ee.Number(overlapThreshold);
+function calculateTPRandFPRRaster(predictedVectors, groundTruthVectors) {
+  scale = scale || 150; // make sure it matches your predicted raster scale
+  overlapThreshold = overlapThreshold || 0.5;
 
-  // Print counts
-  var nPred = predictedVectors.size();
-  var nGT = groundTruthVectors.size();
-  print('Predicted polygon count:', nPred);
-  print('Ground truth polygon count:', nGT);
+  // Rasterize predicted vectors: 1 for flood/seasonal, 0 elsewhere
+  var predRaster = ee.Image(0).byte().paint({
+    featureCollection: predictedVectors,
+    color: 1
+  }).reproject({crs: 'EPSG:4326', scale: scale});
 
-  // For each predicted polygon: compute total intersection area with all GT polygons
-  var predWithOverlap = predictedVectors.map(function(pred) {
-    pred = ee.Feature(pred);
-    var predGeom = pred.geometry();
-    var predArea = ee.Number(predGeom.area());
+  // Rasterize GT vectors: 1 for flooded, 0 elsewhere
+  var gtRaster = ee.Image(0).byte().paint({
+    featureCollection: groundTruthVectors,
+    color: 1
+  }).reproject({crs: 'EPSG:4326', scale: scale});
 
-    // Build FeatureCollection of intersections (each with property 'area')
-    var intersections = groundTruthVectors.map(function(gt) {
-      gt = ee.Feature(gt);
-      var interGeom = gt.geometry().intersection(predGeom, 1); // maxError = 1 meter
-      return ee.Feature(interGeom).set('area', ee.Number(interGeom.area()));
-    }).filter(ee.Filter.gt('area', 0)); // keep only non-empty intersections
+  // Compute True Positives, False Positives, False Negatives
+  var TP = predRaster.and(gtRaster).reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: aoi,
+    scale: scale,
+    maxPixels: 1e13
+  }).get('classification'); // or 'constant', depending on paint()
 
-    var overlapArea = ee.Number(intersections.aggregate_sum('area'));
-    var overlapRatio = overlapArea.divide(predArea.add(1e-10)); // avoid divide-by-zero
+  var FP = predRaster.and(gtRaster.not()).reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: aoi,
+    scale: scale,
+    maxPixels: 1e13
+  }).get('classification');
 
-    return pred.set({
-      'overlapArea': overlapArea,
-      'overlapRatio': overlapRatio,
-      'isTP': overlapRatio.gte(overlapThreshold)
-    });
-  });
+  var FN = predRaster.not().and(gtRaster).reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: aoi,
+    scale: scale,
+    maxPixels: 1e13
+  }).get('classification');
 
-  // For each GT polygon: check if it is detected by any predicted polygon (≥ threshold)
-  var gtWithOverlap = groundTruthVectors.map(function(gt) {
-    gt = ee.Feature(gt);
-    var gtGeom = gt.geometry();
-    var gtArea = ee.Number(gtGeom.area());
+  TP = ee.Number(TP || 0);
+  FP = ee.Number(FP || 0);
+  FN = ee.Number(FN || 0);
 
-    var intersections = predictedVectors.map(function(pred) {
-      pred = ee.Feature(pred);
-      var interGeom = pred.geometry().intersection(gtGeom, 1);
-      return ee.Feature(interGeom).set('area', ee.Number(interGeom.area()));
-    }).filter(ee.Filter.gt('area', 0));
+  var TPR = TP.divide(TP.add(FN));
+  var FPR = FP.divide(FP.add(1)); // avoid div by 0
 
-    var overlapArea = ee.Number(intersections.aggregate_sum('area'));
-    var overlapRatio = overlapArea.divide(gtArea.add(1e-10));
-
-    return gt.set({
-      'overlapArea': overlapArea,
-      'overlapRatio': overlapRatio,
-      'isDetected': overlapRatio.gte(overlapThreshold)
-    });
-  });
-
-  // Extract TP, FP and FN as FeatureCollections
-  var TP_FC = predWithOverlap.filter(ee.Filter.eq('isTP', true));
-  var FP_FC = predWithOverlap.filter(ee.Filter.eq('isTP', false));
-  var FN_FC = gtWithOverlap.filter(ee.Filter.eq('isDetected', false));
-
-  // Counts (ee.Number)
-  var TP = TP_FC.size();
-  var FP = FP_FC.size();
-  var FN = FN_FC.size();
-
-  // Safe TPR and FPR (handle 0 denominators)
-  var TPR = ee.Algorithms.If(ee.Number(TP).add(FN).eq(0), 0,
-             ee.Number(TP).divide(ee.Number(TP).add(FN)));
-  var FPR = ee.Algorithms.If(ee.Number(FP).add(TP).eq(0), 0,
-             ee.Number(FP).divide(ee.Number(FP).add(TP)));
-
-  // Print summary
-  print('--- Polygon-based overlap metrics (threshold = ' + overlapThreshold.getInfo() + ') ---');
-  print('TP:', TP, ' FP:', FP, ' FN:', FN);
-  print('TPR (recall):', TPR);
-  print('FPR (approx):', FPR);
-
-  // Add layers for quick visual check (names include optional freq info)
-  var tag = (weekFreq ? ('_w' + weekFreq) : '') + (yearFreq ? ('_y' + yearFreq) : '');
-  Map.addLayer(predictedVectors, {color: 'gray'}, 'Predicted (All)' + tag);
-  Map.addLayer(groundTruthVectors, {color: 'orange'}, 'GT (All)' + tag);
-  Map.addLayer(TP_FC, {color: 'green'}, 'TP (pred ∩ GT >= thresh)' + tag);
-  Map.addLayer(FP_FC, {color: 'red'}, 'FP (pred < thresh)' + tag);
-  Map.addLayer(FN_FC, {color: 'blue'}, 'FN (GT undetected)' + tag);
-
-  // Return a server-side dictionary
   return ee.Dictionary({
-    'predicted_count': nPred,
-    'gt_count': nGT,
-    'TP': TP,
-    'FP': FP,
-    'FN': FN,
-    'TPR': TPR,
-    'FPR': FPR,
-    'overlapThreshold': overlapThreshold,
-    'weekFreq': weekFreq,
-    'yearFreq': yearFreq
+    TP: TP,
+    FP: FP,
+    FN: FN,
+    TPR: TPR,
+    FPR: FPR
   });
 }
-
-
 
 // Sequential processing function to avoid race conditions
 function processNextCombination(combinationIndex) {
@@ -600,25 +548,40 @@ function processNextCombination(combinationIndex) {
   Map.addLayer(result, {}, layerName);
   
   if (result) {
-    calculateVectorTPR_FPR(result, processedGTImage,0.5, function(metrics) {
-      if (metrics) {
-        rocResults.push(metrics);
-        print('Combination', combinationIndex + 1, 'complete - TPR:', metrics.TPR.toFixed(4), 'FPR:', metrics.FPR.toFixed(4));
-      } else {
-        print('Failed to calculate metrics for combination', combinationIndex + 1);
-      }
+    
+     // Calculate overlap metrics on the server
+    var metrics = calculateTPRandFPRRaster(result, processedGTImage);
+    print('Server-side metrics (raw):', metrics);
+    // Bring server-side dictionary to client to store in JS array
+    metrics.evaluate(function(clientMetrics) {
       
-      // Process next combination only after current one is complete
+      print('Client metrics:', clientMetrics);
+      
+      if (clientMetrics) {
+        clientMetrics.weekFreq = weekFreq;
+        clientMetrics.yearFreq = yearFreq;
+        rocResults.push(clientMetrics);
+        print('Combination', combinationIndex + 1, 
+              '- TPR:', clientMetrics.TPR ? clientMetrics.TPR.toFixed(4) : 'NaN',
+              'FPR:', clientMetrics.FPR ? clientMetrics.FPR.toFixed(4) : 'NaN',
+              'Pred:', clientMetrics.numPredicted,
+              'GT:', clientMetrics.numGroundTruth);
+      } else {
+        print('⚠️ Failed to compute metrics for combination', combinationIndex + 1);
+      }
+    
       processNextCombination(combinationIndex + 1);
     });
+    
+    
   } else {
     print('No results for combination', combinationIndex + 1, '- WeekFreq:', weekFreq, 'YearFreq:', yearFreq);
     // Continue to next combination immediately if no processing needed
     processNextCombination(combinationIndex + 1);
   }
   
-  if(result && result.floodResults){
-      processNextCombination(combinationIndex + 1);  
+  if(result && result.floodResults){//update thsi once we are getting results
+      // processNextCombination(combinationIndex + 1);  
   }
 }
 
