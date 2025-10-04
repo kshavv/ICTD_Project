@@ -470,60 +470,64 @@ var baseClassification = baseInfo.base;
 //====================ADDITIONAL FUNCTIONS FOR ROC CURVE ANALYSIS=================
 //================================================================================
 
-function calculateTPRandFPRRaster(predictedVectors, groundTruthVectors) {
-  scale = scale || 150; // make sure it matches your predicted raster scale
-  overlapThreshold = overlapThreshold || 0.5;
-
-  // Rasterize predicted vectors: 1 for flood/seasonal, 0 elsewhere
-  var predRaster = ee.Image(0).byte().paint({
+function calculateTPRandFPRFromVectors(predictedVectors, gtVectors,weekFreq,yearFreq,callback) {
+  // Convert both vector collections to 1/0 rasters
+  var predictedRaster = ee.Image(0).byte().paint({
     featureCollection: predictedVectors,
     color: 1
-  }).reproject({crs: 'EPSG:4326', scale: scale});
+  }).clip(aoi);
 
-  // Rasterize GT vectors: 1 for flooded, 0 elsewhere
   var gtRaster = ee.Image(0).byte().paint({
-    featureCollection: groundTruthVectors,
+    featureCollection: gtVectors,
     color: 1
-  }).reproject({crs: 'EPSG:4326', scale: scale});
+  }).clip(aoi);
 
-  // Compute True Positives, False Positives, False Negatives
-  var TP = predRaster.and(gtRaster).reduceRegion({
+  // Compute TP, FP, FN, TN masks
+  var truePositives  = predictedRaster.and(gtRaster);
+  var falsePositives = predictedRaster.and(gtRaster.not());
+  var falseNegatives = gtRaster.and(predictedRaster.not());
+  var trueNegatives  = predictedRaster.not().and(gtRaster.not());
+
+  // Combine all in one reduceRegion call
+  var combined = ee.Image([
+    truePositives.rename('TP'),
+    falsePositives.rename('FP'),
+    falseNegatives.rename('FN'),
+    trueNegatives.rename('TN')
+  ]);
+
+  combined.reduceRegion({
     reducer: ee.Reducer.sum(),
     geometry: aoi,
-    scale: scale,
+    scale: 30,
     maxPixels: 1e13
-  }).get('classification'); // or 'constant', depending on paint()
+  }).evaluate(function(result, error) {
+    if (error) {
+      print('Error calculating metrics for weekFreq:', weekFreq, 'yearFreq:', yearFreq, error);
+      callback(null);
+    } else {
+      var tp = result.TP || 0;
+      var fp = result.FP || 0;
+      var fn = result.FN || 0;
+      var tn = result.TN || 0;
 
-  var FP = predRaster.and(gtRaster.not()).reduceRegion({
-    reducer: ee.Reducer.sum(),
-    geometry: aoi,
-    scale: scale,
-    maxPixels: 1e13
-  }).get('classification');
+      // Avoid division by zero
+      var tpr = (tp + fn) > 0 ? tp / (tp + fn) : 0;
+      var fpr = (fp + tn) > 0 ? fp / (fp + tn) : 0;
 
-  var FN = predRaster.not().and(gtRaster).reduceRegion({
-    reducer: ee.Reducer.sum(),
-    geometry: aoi,
-    scale: scale,
-    maxPixels: 1e13
-  }).get('classification');
-
-  TP = ee.Number(TP || 0);
-  FP = ee.Number(FP || 0);
-  FN = ee.Number(FN || 0);
-
-  var TPR = TP.divide(TP.add(FN));
-  var FPR = FP.divide(FP.add(1)); // avoid div by 0
-
-  return ee.Dictionary({
-    TP: TP,
-    FP: FP,
-    FN: FN,
-    TPR: TPR,
-    FPR: FPR
+      callback({
+        TPR: tpr,
+        FPR: fpr,
+        weekFreq: weekFreq,
+        yearFreq: yearFreq,
+        TP: tp,
+        FP: fp,
+        FN: fn,
+        TN: tn
+      });
+    }
   });
 }
-
 // Sequential processing function to avoid race conditions
 function processNextCombination(combinationIndex) {
   if (combinationIndex >= parameterCombinations.length) {
@@ -542,37 +546,24 @@ function processNextCombination(combinationIndex) {
   
   
   //processSelectedMasks(selectedYear,selectedWeek,yearFreq,weekFreq)
-  var result = processSelectedMask(2018, 4, yearFreq, weekFreq);
+  var result = processSelectedMask(2018, 3, yearFreq, weekFreq);
   var layerName = 'Flood polygons' + '_Yfreq' + yearFreq + '_Wfreq' + weekFreq;
 
   Map.addLayer(result, {}, layerName);
   
   if (result) {
-    
-     // Calculate overlap metrics on the server
-    var metrics = calculateTPRandFPRRaster(result, processedGTImage);
-    print('Server-side metrics (raw):', metrics);
-    // Bring server-side dictionary to client to store in JS array
-    metrics.evaluate(function(clientMetrics) {
       
-      print('Client metrics:', clientMetrics);
-      
-      if (clientMetrics) {
-        clientMetrics.weekFreq = weekFreq;
-        clientMetrics.yearFreq = yearFreq;
-        rocResults.push(clientMetrics);
-        print('Combination', combinationIndex + 1, 
-              '- TPR:', clientMetrics.TPR ? clientMetrics.TPR.toFixed(4) : 'NaN',
-              'FPR:', clientMetrics.FPR ? clientMetrics.FPR.toFixed(4) : 'NaN',
-              'Pred:', clientMetrics.numPredicted,
-              'GT:', clientMetrics.numGroundTruth);
+       calculateTPRandFPRFromVectors(result, processedGTImage,weekFreq,yearFreq, function(metrics) {
+      if (metrics) {
+        rocResults.push(metrics);
+        print('Combination', combinationIndex + 1, 'complete - TPR:', metrics.TPR.toFixed(4), 'FPR:', metrics.FPR.toFixed(4));
       } else {
-        print('⚠️ Failed to compute metrics for combination', combinationIndex + 1);
+        print('Failed to calculate metrics for combination', combinationIndex + 1);
       }
-    
+      
+      // Process next combination only after current one is complete
       processNextCombination(combinationIndex + 1);
     });
-    
     
   } else {
     print('No results for combination', combinationIndex + 1, '- WeekFreq:', weekFreq, 'YearFreq:', yearFreq);
