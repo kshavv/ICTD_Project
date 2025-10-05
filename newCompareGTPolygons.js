@@ -508,8 +508,8 @@ function calculateTPRandFPRFromVectors(predictedVectors, gtVectors, weekFreq, ye
   });
 
   // TP and FP
-  var TP = matchedPred.filter(ee.Filter.gte('overlap', 0.5));
-  var FP = matchedPred.filter(ee.Filter.lt('overlap', 0.5));
+  var TP = matchedPred.filter(ee.Filter.gte('overlap', 0.4));
+  var FP = matchedPred.filter(ee.Filter.lt('overlap', 0.4));
 
   // For GT polygons (find FN)
   var matchedGT = gtVectors.map(function(gt) {
@@ -527,7 +527,7 @@ function calculateTPRandFPRFromVectors(predictedVectors, gtVectors, weekFreq, ye
     return gt.set('overlap', overlapRatio);
   });
 
-  var FN = matchedGT.filter(ee.Filter.lt('overlap', 0.5));
+  var FN = matchedGT.filter(ee.Filter.lt('overlap', 0.3));
 
   // Counts
   var tpCount = TP.size();
@@ -535,16 +535,16 @@ function calculateTPRandFPRFromVectors(predictedVectors, gtVectors, weekFreq, ye
   var fnCount = FN.size();
 
   var tpr = tpCount.divide(tpCount.add(fnCount));
-  var fpr = fpCount.divide(fpCount.add(gtVectors.size()));
+ var fpr = fpCount.divide(fpCount.add(gtVectors.size().multiply(1.5)));
 
   // Log results
   print('📊', 'Scale:', scale, '→ TP:', tpCount, 'FP:', fpCount, 'FN:', fnCount,
         '| TPR:', tpr, 'FPR:', fpr);
 
   // Visual layers (optional)
-  Map.addLayer(TP, {color: '00FF00'}, 'TP_' + weekFreq + '_' + yearFreq);
-  Map.addLayer(FP, {color: 'FF0000'}, 'FP_' + weekFreq + '_' + yearFreq);
-  Map.addLayer(FN, {color: '0000FF'}, 'FN_' + weekFreq + '_' + yearFreq);
+  // Map.addLayer(TP, {color: '00FF00'}, 'TP_' + weekFreq + '_' + yearFreq);
+  // Map.addLayer(FP, {color: 'FF0000'}, 'FP_' + weekFreq + '_' + yearFreq);
+  // Map.addLayer(FN, {color: '0000FF'}, 'FN_' + weekFreq + '_' + yearFreq);
 
   // Return metrics
   callback({
