@@ -1,3 +1,9 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var gt = ee.Image("projects/ee-mtpictd-dev/assets/kerala_GT"),
+    gt1 = ee.Image("projects/ee-mtpictd-dev/assets/Assam_GT"),
+    gt2 = ee.Image("projects/ee-mtpictd-dev/assets/Haryana_GT"),
+    gt3 = ee.Image("projects/ee-mtpictd-dev/assets/kerala_new_GT");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
 
 
 // Modified version with ROC curve analysis
@@ -10,8 +16,8 @@ var CONFIG = {
   // Classification threshold6
   threshold: -16,
   perennialThreshold: 0.90,
-  weekFreq: 0.3,
-  yearFreq: 0.3,
+  weekFreq: 0.6,
+  yearFreq: 0.9,
   
   // Processing parameters
   minAreaSqm: 100000,
@@ -27,8 +33,8 @@ var CONFIG = {
   batchMode: true,
   // batchWeekFreq: [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
   // batchYearFreq: [0.5,0.6,0.7,0.8,0.9,1.0]
-  batchWeekFreq: [0.2,0.9],
-  batchYearFreq: [0.2]
+  batchWeekFreq: [0.5],
+  batchYearFreq: [0.9]
 };
 
 //=========================================================
@@ -548,8 +554,15 @@ function processNextCombination(combinationIndex) {
   //processSelectedMasks(selectedYear,selectedWeek,yearFreq,weekFreq)
   var result = processSelectedMask(2018, 3, yearFreq, weekFreq);
   var layerName = 'Flood polygons' + '_Yfreq' + yearFreq + '_Wfreq' + weekFreq;
+  
+  var styled = result.style({
+  color: '#60FF8B',  // Outline color
+  fillColor: '#607D8BAA',  // Fill color
+  width: 1  // Outline width in pixels
+});
 
-  Map.addLayer(result, {}, layerName);
+
+  Map.addLayer(styled, {}, layerName);
   
   if (result) {
       
