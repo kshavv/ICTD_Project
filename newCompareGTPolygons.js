@@ -1,6 +1,6 @@
 
 
-// Modified version with ROC curve analysis
+// Modified CONfIG  with ROC curve analysis parameters
 var CONFIG = {
   // Time parameters
   years: [2018, 2019, 2020, 2021, 2022, 2023, 2024],
@@ -8,13 +8,13 @@ var CONFIG = {
   monsoonEnd: 10,
   
   // Classification threshold6
-  threshold: -16,
+  threshold: -17,
   perennialThreshold: 0.90,
   weekFreq: 0.3,
   yearFreq: 0.3,
   
   // Processing parameters
-  minAreaSqm: 100000,
+  minAreaSqm: 0,
   regionBoundsSize: 0,
   
   // Export parameters
@@ -25,10 +25,10 @@ var CONFIG = {
   
   // Batch processing mode
   batchMode: true,
-  // batchWeekFreq: [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
-  // batchYearFreq: [0.5,0.6,0.7,0.8,0.9,1.0]
+  // batchWeekFreq: [0.1,0.3,0.4,0.6,0.8,0.9,1.0],
+  // batchYearFreq: [0.1,0.3,0.5,0.7,0.9,1.0]
   batchWeekFreq: [0.9],
-  batchYearFreq: [0.2,0.5]
+  batchYearFreq: [0.5]
 };
 
 //=========================================================
@@ -37,6 +37,9 @@ var rocResults = [];
 var processedCombinations = 0;
 var totalCombinations = CONFIG.batchWeekFreq.length * CONFIG.batchYearFreq.length;
 var parameterCombinations = [];
+var GTImageRes;
+
+
 
 // Pre-generate all parameter combinations
 function generateParameterCombinations() {
@@ -79,7 +82,7 @@ function processGroundTruth(gtImage, minAreaSqm) {
   // Step 2: Vectorize the mask to create polygons from the raster data.
   var floodVectors = smudgedMask.reduceToVectors({
     geometry: processingGeom, // Use the image's geometry
-    scale: exportScale, // Use the export scale for vectorization
+    scale: GTImageRes, // Use the export scale for vectorization
     geometryType: 'polygon',
     labelProperty: 'class',
     maxPixels: 1e13
@@ -110,7 +113,16 @@ function processGroundTruth(gtImage, minAreaSqm) {
   return filteredVectors;
 }
 
+
+function getSpatialResolution(image) {
+  var scale = image.projection().nominalScale();
+  print('Spatial resolution (meters):', scale);
+  return scale;
+}
+
+
 var gt = gt3;
+GTImageRes = getSpatialResolution(gt);
 processedGTImage = processGroundTruth(gt, 300000);
 
   // Visualize: 0 = black (non-flooded), 1 = green (flooded)
@@ -383,7 +395,7 @@ function createFloodWaterVectors(classificationImage, year, biWeek, exportResult
 
   var floodVectors = smudgedMask.reduceToVectors({
     geometry: aoi, //debug (original .clip(aoi.geometry())) -- key::geometry
-    scale: 150,
+    scale: GTImageRes,
     geometryType: 'polygon',
     maxPixels: 1e13
   });
@@ -404,7 +416,7 @@ function createFloodWaterVectors(classificationImage, year, biWeek, exportResult
   // }).clip(aoi.geometry());
 
   if (!CONFIG.batchMode) {
-    Map.addLayer(filteredVectors, {palette: ['#FF5733']}, 'Final Flood Raster');
+    Map.addLayer(filteredVectors, {palette: ['#00FF33']}, 'Final Flood Raster');
   }
 
   // Export if requested
@@ -542,9 +554,9 @@ function calculateTPRandFPRFromVectors(predictedVectors, gtVectors, weekFreq, ye
         '| TPR:', tpr, 'FPR:', fpr);
 
   // Visual layers (optional)
-  // Map.addLayer(TP, {color: '00FF00'}, 'TP_' + weekFreq + '_' + yearFreq);
-  // Map.addLayer(FP, {color: 'FF0000'}, 'FP_' + weekFreq + '_' + yearFreq);
-  // Map.addLayer(FN, {color: '0000FF'}, 'FN_' + weekFreq + '_' + yearFreq);
+  Map.addLayer(TP, {color: '00FF00'}, 'TP_' + weekFreq + '_' + yearFreq);
+  Map.addLayer(FP, {color: 'FF0000'}, 'FP_' + weekFreq + '_' + yearFreq);
+  Map.addLayer(FN, {color: '0000FF'}, 'FN_' + weekFreq + '_' + yearFreq);
 
   // Return metrics
   callback({
@@ -563,7 +575,7 @@ function calculateTPRandFPRFromVectors(predictedVectors, gtVectors, weekFreq, ye
 // Sequential processing function to avoid race conditions
 function processNextCombination(combinationIndex) {
   if (combinationIndex >= parameterCombinations.length) {
-    print('✅ All combinations processed. Generating ROC curve...');
+    print('All combinations processed. Generating ROC curve...');
     generateROCCurve();
     return;
   }
@@ -572,21 +584,27 @@ function processNextCombination(combinationIndex) {
   var weekFreq = combo.weekFreq;
   var yearFreq = combo.yearFreq;
 
-  print('▶️ Processing combination:', combinationIndex + 1, 'of', totalCombinations, 
+  print('Processing combination:', combinationIndex + 1, 'of', totalCombinations, 
         '- WeekFreq:', weekFreq, 'YearFreq:', yearFreq);
 
   // Get predicted polygons (server-side object)
-  var result = processSelectedMask(2018, 3, yearFreq, weekFreq);
+  var result = processSelectedMask(2018, 4, yearFreq, weekFreq);
 
   if (!result) {
-    print('⚠️ No result for', weekFreq, yearFreq);
+    print('No result for', weekFreq, yearFreq);
     processNextCombination(combinationIndex + 1);
     return;
   }
 
   // Display on map for debug
+  var styledResult = result.style({
+    color: '#00FF00',       // outline color
+    fillColor: '#00FF00',     // fill color
+    width: 1              // outline width
+  });
+  
   var layerName = 'Flood polygons_Y' + yearFreq + '_W' + weekFreq;
-  Map.addLayer(result, {}, layerName);
+  Map.addLayer(styledResult, {}, layerName);
 
   // Defer metric computation
   print('⏳ Calculating TPR/FPR for:', weekFreq, yearFreq);
@@ -613,7 +631,7 @@ function processNextCombination(combinationIndex) {
               '- TPR:', tpr.toFixed(3),
               'FPR:', fpr.toFixed(3));
   
-        print('➡️ Moving to next combination...');
+        print('Moving to next combination...');
         processNextCombination(combinationIndex + 1);
       });
   
