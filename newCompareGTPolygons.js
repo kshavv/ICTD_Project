@@ -11,7 +11,7 @@ var CONFIG = {
   threshold: -17,
   perennialThreshold: 0.90,
   weekFreq: 0.3,
-  yearFreq: 0.3,
+  yearFreq: 0.9,
   
   // Processing parameters
   minAreaSqm: 0,
@@ -38,6 +38,7 @@ var processedCombinations = 0;
 var totalCombinations = CONFIG.batchWeekFreq.length * CONFIG.batchYearFreq.length;
 var parameterCombinations = [];
 var GTImageRes;
+var GT_PROJECTION;
 
 
 
@@ -83,6 +84,7 @@ function processGroundTruth(gtImage, minAreaSqm) {
   var floodVectors = smudgedMask.reduceToVectors({
     geometry: processingGeom, // Use the image's geometry
     scale: GTImageRes, // Use the export scale for vectorization
+    crs: GT_PROJECTION,
     geometryType: 'polygon',
     labelProperty: 'class',
     maxPixels: 1e13
@@ -120,9 +122,15 @@ function getSpatialResolution(image) {
   return scale;
 }
 
+function getProjection(image){
+  var pro = gt.projection();
+  print('Projection', pro);
+  return pro;
+}
 
 var gt = gt3;
 GTImageRes = getSpatialResolution(gt);
+GT_PROJECTION = getProjection(gt);
 processedGTImage = processGroundTruth(gt, 300000);
 
   // Visualize: 0 = black (non-flooded), 1 = green (flooded)
@@ -396,6 +404,7 @@ function createFloodWaterVectors(classificationImage, year, biWeek, exportResult
   var floodVectors = smudgedMask.reduceToVectors({
     geometry: aoi, //debug (original .clip(aoi.geometry())) -- key::geometry
     scale: GTImageRes,
+    crs: GT_PROJECTION,
     geometryType: 'polygon',
     maxPixels: 1e13
   });
