@@ -20,7 +20,7 @@ var CONFIG = {
   yearFreq: 0.9,
   
   // Processing parameters
-  minAreaSqm: 100000,
+  minAreaSqm: 0,//100000
   regionBoundsSize: 0,
   
   // Export parameters
@@ -114,7 +114,21 @@ function processGroundTruth(gtImage, minAreaSqm) {
   return filteredVectors;
 }
 
+function getSpatialResolution(image) {
+  var scale = image.projection().nominalScale();
+  print('Spatial resolution (meters):', scale);
+  return scale;
+}
+
+function getProjection(image){
+  var pro = gt.projection();
+  print('Projection', pro);
+  return pro;
+}
+
 var gt = gt3;
+GTImageRes = getSpatialResolution(gt);
+GT_PROJECTION = getProjection(gt);
 processedGTImage = processGroundTruth(gt, 300000);
 
   // Visualize: 0 = black (non-flooded), 1 = green (flooded)
