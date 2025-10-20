@@ -14,7 +14,7 @@ var CONFIG = {
   yearFreq: 0.9,            
   
   // Processing parameters
-  minAreaSqm: 200000,
+  minAreaSqm: 100000,
   regionBoundsSize: 0, // Set to 0 to use full AOI bounds
   
   // Export parameters
@@ -37,7 +37,7 @@ function processGroundTruth(gtImage, minAreaSqm) {
   Map.clear();
   var processingGeom = gtImage.geometry();
 
-  Map.centerObject(processingGeom, 12);
+  // Map.centerObject(processingGeom, 12);
   
   // Set default export scale if not provided
   var exportScale = 30;
@@ -83,29 +83,35 @@ function processGroundTruth(gtImage, minAreaSqm) {
 
   return finalGTRaster;
 }
-processedGTImage = processGroundTruth(gt, CONFIG.minAreaSqm);
+processedGTImage = processGroundTruth(gt, 300000);
 
 
 // ==================== REGION SETUP ====================
-function setupRegion() {
+
   var districts = ee.FeatureCollection("FAO/GAUL/2015/level2");
-  var region = districts.filter(ee.Filter.and(
+  var myPredictionRegion = districts.filter(ee.Filter.and(
     ee.Filter.eq("ADM1_NAME", "Kerala"),
       ee.Filter.or(
-      ee.Filter.eq("ADM2_NAME", "Ernakulam"),
+      // ee.Filter.eq("ADM2_NAME", "Ernakulam"),
       ee.Filter.eq("ADM2_NAME", "Kottayam"),
       ee.Filter.eq("ADM2_NAME", "Alappuzha"),
       ee.Filter.eq("ADM2_NAME", "Pattanamtitta")
     )
   ));
+  
+  Map.addLayer(myPredictionRegion,{},'my_predicred_region');
+
+
+function setupRegion() {
+
 
   var aoi;
   if (CONFIG.regionBoundsSize) { //clip the boundary based on the clipping box
     aoi = region.geometry().centroid().buffer(CONFIG.regionBoundsSize / 2).bounds();
     print('Using centered export box of size (m):', CONFIG.regionBoundsSize);
   } else {
-    // aoi = region; //return the entire region
-    aoi = processedGTImage.geometry(); 
+    aoi = myPredictionRegion; //return the entire region
+    // aoi = processedGTImage.geometry(); 
     // aoi = gt;
     print('Using default AOI bounds for export.');
   }
@@ -115,7 +121,7 @@ function setupRegion() {
 
 // Initialize AOI
 var aoi = setupRegion();
-Map.centerObject(aoi, 10);
+Map.centerObject(aoi);
 Map.addLayer(aoi, {}, 'AOI');
 
 
@@ -323,7 +329,7 @@ function processSelectedMask(selectedYear, selectedBiWeek, exportResults) {
       var floodResults = createFloodWaterVectors(finalClassification, selectedYear, selectedBiWeek, exportResults);
       if (!CONFIG.batchMode) {
         Map.layers().set(1, ui.Map.Layer(finalClassification.clip(aoi), {//debug (original .clip(aoi.geometry())) -- key::geometry
-          palette: ['000000', '0000FF', '00FF00', 'FFFF00', 'FF0000'],
+          palette: ['000000', '0000FF', '00FF0000', 'FFFF00', 'FF0000'],
           min: 0, max: 4
         }, 'Water Classification'));
       }
@@ -352,11 +358,11 @@ function createFloodWaterVectors(classificationImage, year, biWeek, exportResult
   // var floodMask = classificationImage.eq(3).selfMask();
   
   
-  var smudgedMask = floodMask.focal_max({ radius: 25, units: 'meters' }).selfMask();
+  var smudgedMask = floodMask.focal_max({ radius: 50, units: 'meters' }).selfMask();
 
   var floodVectors = smudgedMask.reduceToVectors({
     geometry: aoi, //debug (original .clip(aoi.geometry())) -- key::geometry
-    scale: 30,
+    scale: 150,
     geometryType: 'polygon',
     maxPixels: 1e13
   });
