@@ -1,9 +1,4 @@
-/**** Start of imports. If edited, may not auto-convert in the playground. ****/
-var gt = ee.Image("projects/ee-mtpictd-dev/assets/kerala_GT"),
-    gt1 = ee.Image("projects/ee-mtpictd-dev/assets/Assam_GT"),
-    gt2 = ee.Image("projects/ee-mtpictd-dev/assets/Haryana_GT"),
-    gt3 = ee.Image("projects/ee-mtpictd-dev/assets/kerala_new_GT");
-/***** End of imports. If edited, may not auto-convert in the playground. *****/
+
 
 
 // Modified version with ROC curve analysis
@@ -31,10 +26,11 @@ var CONFIG = {
   
   // Batch processing mode
   batchMode: true,
-  // batchWeekFreq: [0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0],
-  // batchYearFreq: [0.5,0.6,0.7,0.8,0.9,1.0]
-  batchWeekFreq: [0.5],
-  batchYearFreq: [0.9]
+  batchWeekFreq: [0.5,0.6,0.7,0.8,0.9,1.0],
+  batchYearFreq: [0.5,0.6,0.7,0.8,0.9,1.0],
+  thresholdList: [-15,-16,-17,-18],
+  perennialThresholdList:[0.8,0.82,0.84,0.86,0.88,0.90,0.92,0.94,0.96]
+
 };
 
 //=========================================================
@@ -43,19 +39,29 @@ var rocResults = [];
 var processedCombinations = 0;
 var totalCombinations = CONFIG.batchWeekFreq.length * CONFIG.batchYearFreq.length;
 var parameterCombinations = [];
+var GTImageRes
+var GT_PROJECTION
 
 // Pre-generate all parameter combinations
 function generateParameterCombinations() {
   parameterCombinations = [];
-  for (var i = 0; i < CONFIG.batchWeekFreq.length; i++) {
-    for (var j = 0; j < CONFIG.batchYearFreq.length; j++) {
-      parameterCombinations.push({
-        weekFreq: CONFIG.batchWeekFreq[i],
-        yearFreq: CONFIG.batchYearFreq[j],
-        index: parameterCombinations.length
+
+  CONFIG.batchWeekFreq.forEach(function(weekFreq) {
+    CONFIG.batchYearFreq.forEach(function(yearFreq) {
+      CONFIG.thresholdList.forEach(function(threshold) {
+        CONFIG.perennialThresholdList.forEach(function(perennialThreshold) {
+
+          parameterCombinations.push({
+            weekFreq: weekFreq,
+            yearFreq: yearFreq,
+            threshold: threshold,
+            perennialThreshold: perennialThreshold
+          });
+
+        });
       });
-    }
-  }
+    });
+  });
 }
 
 //=========================================================
@@ -66,14 +72,9 @@ function generateParameterCombinations() {
 //defining and processing the ground truth
 var processedGTImage;
 function processGroundTruth(gtImage, minAreaSqm) {
-
   Map.clear();
   var processingGeom = gtImage.geometry();
-
   Map.centerObject(processingGeom, 12);
-  
-  // Set default export scale if not provided
-  var exportScale = 30;
 
   // Isolate flood pixels (value is 1 for ground truth).
   var floodMask = gtImage.eq(1).selfMask();
@@ -81,37 +82,42 @@ function processGroundTruth(gtImage, minAreaSqm) {
   // The 'focal_max' (smudging) step is skipped for ground truth data
   // to preserve its original accuracy.
   // Step 2: Vectorize the mask to create polygons from the raster data.
-  var floodVectors = floodMask.reduceToVectors({
-    geometry: processingGeom, // Use the image's geometry
-    scale: exportScale, // Use the export scale for vectorization
-    geometryType: 'polygon',
-    labelProperty: 'class',
-    maxPixels: 1e13
-  });
+  // var floodVectors = floodMask.reduceToVectors({
+  //   geometry: processingGeom, // Use the image's geometry
+  //   scale: GTImageRes, // Use the export scale for vectorization
+  //   crs: GT_PROJECTION,
+  //   geometryType: 'polygon',
+  //   labelProperty: 'class',
+  //   maxPixels: 1e13
+  // });
   
   // Step 3: Compute the area of each polygon and store it as a property.
-  floodVectors = floodVectors.map(function(feature) {
-    var area = feature.geometry().area({maxError: 1});
-    return feature.set({'area_m2': area});
-  });
+  // floodVectors = floodVectors.map(function(feature) {
+  //   var area = feature.geometry().area({maxError: 1});
+  //   return feature.set({'area_m2': area});
+  // });
 
   // Step 4: Filter out polygons that are smaller than the specified minimum area.
-  var filteredVectors = floodVectors.filter(ee.Filter.gte('area_m2', minAreaSqm));
+  // var filteredVectors = floodVectors.filter(ee.Filter.gte('area_m2', minAreaSqm));
 
   
   // Step 5: Convert the filtered vectors back into a raster image.
   // Rasterize filteredVectors: flood areas get value 1, background is 0
-  var finalGTRaster = ee.Image(0).byte().paint({
-    featureCollection: filteredVectors,
-    color: 1
-  }).clip(processingGeom);
+  // var finalGTRaster = ee.Image(0).byte().paint({
+  //   featureCollection: filteredVectors,
+  //   color: 1
+  // }).clip(processingGeom);
   
+    var reprojectedImage = gtImage.reproject({
+    crs: GT_PROJECTION, 
+    scale: GTImageRes
+  });
 
 
   var rasterFileName = 'GT_flood_raster_';
   var rasterDescription = 'GT_Flood_Raster_';
 
-  return filteredVectors;
+  return reprojectedImage;
 }
 
 function getSpatialResolution(image) {
@@ -121,7 +127,7 @@ function getSpatialResolution(image) {
 }
 
 function getProjection(image){
-  var pro = gt.projection();
+  var pro = image.projection();
   print('Projection', pro);
   return pro;
 }
@@ -140,7 +146,6 @@ Map.addLayer(processedGTImage,
 //================================================================================
 
 
-//no prob uptill here ------------------------------------------------------------------- 
 
 
 //================================================================================
@@ -149,7 +154,7 @@ Map.addLayer(processedGTImage,
 
 var aoi = gt.geometry();
 Map.centerObject(aoi,10);
-Map.addLayer(aoi, {}, 'AOI');
+// Map.addLayer(aoi, {}, 'AOI');
 
 //================================================================================
 //================================================================================
@@ -183,7 +188,7 @@ function s1CollectionForPeriod(start, end) {
     .filter(ee.Filter.eq('instrumentMode', 'IW'))
     .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
     .select(['VV'])
-    // .map(function(img) { return img.clip(aoi.geometry()); });
+    .map(refinedLee)
     .map(function(img) { return img.clip(aoi); });
 }
 
@@ -193,8 +198,9 @@ function s1CollectionForPeriod(start, end) {
 * @param {ee.Number|number} year The year to process.
 * @return {ee.ImageCollection} The collection of bi-weekly water masks.
 */
-function createBiWeeklyMasksForYear(year) {
+function createBiWeeklyMasksForYear(year,threshold) {
   year = ee.Number(year);
+  threshold = ee.Number(threshold);
   var start = ee.Date.fromYMD(year, CONFIG.monsoonStart, 1);
   var starts = listBiWeekStarts(year);
 
@@ -214,7 +220,7 @@ function createBiWeeklyMasksForYear(year) {
       );
       biweeklyMean = ee.Image(biweeklyMean);
 
-      var mask = biweeklyMean.lt(CONFIG.threshold).rename('water');
+      var mask = biweeklyMean.lt(threshold).rename('water');
       var biWkNum = w0.difference(start, 'week').divide(2).floor();
 
       return mask.set({
@@ -229,11 +235,11 @@ function createBiWeeklyMasksForYear(year) {
 /**
 * Builds a single ImageCollection containing all bi-weekly masks from all years.
 */
-function buildAllYearsMasks() {
+function buildAllYearsMasks(threshold) {
   var allImagesList = ee.List(CONFIG.years).map(function(y) {
     // For each year, get the collection and convert it to a list of images.
     // 100 is a safe upper limit for the number of bi-weeks in a monsoon season.
-    return createBiWeeklyMasksForYear(y).toList(100);
+    return createBiWeeklyMasksForYear(y,threshold).toList(100);
   }).flatten(); // Flatten the list of lists into a single list of images.
   
   // Create a single collection from the flat list of all images.
@@ -259,7 +265,7 @@ function buildAllYearsMasks() {
 * @param {ee.ImageCollection} allMasksAllYears - Collection from buildAllYearsMasks().
 * @return {Object} An object containing the base classification and frequency info.
 */
-function classifyPerennialAndNonWater(allMasksAllYears) {
+function classifyPerennialAndNonWater(allMasksAllYears,perennialThreshold) {
   // Count how many valid (unmasked) observations exist for each pixel
   var validCount = allMasksAllYears
     .map(function(img) { return img.mask().rename('m'); })
@@ -274,7 +280,7 @@ function classifyPerennialAndNonWater(allMasksAllYears) {
   var freq = waterPresenceSum.divide(validCount.add(1e-10)) // avoid division by zero
     .updateMask(validCount.gt(0));
 
-  var perennial = freq.gte(CONFIG.perennialThreshold);
+  var perennial = freq.gte(perennialThreshold);
   var nonWater = freq.eq(0);
 
   // Create base classification: 1 for perennial, 2 for non-water, 0 for others
@@ -294,10 +300,10 @@ function classifyPerennialAndNonWater(allMasksAllYears) {
 * Classifies the remaining pixels into seasonal, flood, or temporary non-water.
 * This is the main function triggered by the UI.
 */
-function processSelectedMask(selectedYear, selectedBiWeek, yearFreq, weekFreq) {
+function processSelectedMask(selectedYear, selectedBiWeek, yearFreq, weekFreq,threshold) {
   var exportResults = false;
   
-  var selectedYearMasks = createBiWeeklyMasksForYear(selectedYear);
+  var selectedYearMasks = createBiWeeklyMasksForYear(selectedYear,threshold);
   var currentWaterMask = ee.Image(selectedYearMasks
     .filter(ee.Filter.eq('biweek_index', selectedBiWeek))
     .first());
@@ -365,14 +371,13 @@ var classificationResult = ee.Algorithms.If(
 
   // Directly create vectors here (server-side)
   // Create vectors server-side, with an empty FeatureCollection fallback
-  var floodVectors = ee.FeatureCollection(
+  var floodImage = ee.Image(
     ee.Algorithms.If(
       classificationResult,
-      createFloodWaterVectors(finalClassification), // returns ee.FeatureCollection
-      ee.FeatureCollection([]) // fallback if no classification (avoid null)
+      createFloodWaterMask(finalClassification),               // ee.Image
+      ee.Image(0).updateMask(ee.Image(0))                     // empty masked image
     )
   );
-
   // Optional visualization if not in batch mode
   if (!CONFIG.batchMode) {
     Map.layers().set(1, ui.Map.Layer(finalClassification.clip(aoi), {
@@ -382,57 +387,27 @@ var classificationResult = ee.Algorithms.If(
   }
 
   // Return the vector result
-  return floodVectors;
+  return floodImage;
 }
 
 
 /**
 * Converts flood and seasonal water classes to vector polygons, filters by area, and exports.
 */
-function createFloodWaterVectors(classificationImage, year, biWeek, exportResults) {
+function createFloodWaterMask(classificationImage, year, biWeek, exportResults) {
   exportResults = exportResults || false;
   
-
   var floodMask = classificationImage.eq(3).or(classificationImage.eq(4)).selfMask();
-  // var floodMask = classificationImage.eq(3).selfMask();
-  
-  
   var smudgedMask = floodMask.focal_max({ radius: 36, units: 'meters' }).selfMask();
 
-  var floodVectors = smudgedMask.reduceToVectors({
-    geometry: aoi, //debug (original .clip(aoi.geometry())) -- key::geometry
-    scale: 150,
-    geometryType: 'polygon',
-    maxPixels: 1e13
-  });
-  
-  // Map over the vectors to calculate the area of each polygon
-  floodVectors = floodVectors.map(function(feature) {
-    return feature.set({'area_m2': feature.geometry().area({maxError: 1})});
+  var finalFloodRaster = smudgedMask
+  .reproject({
+    crs: GT_PROJECTION,   // define below
+    scale: GTImageRes     // define below
   });
 
-  // Filter the polygons by the minimum area threshold
-  var filteredVectors = floodVectors.filter(ee.Filter.gte('area_m2', CONFIG.minAreaSqm));
-  // print('Filtered flood/seasonal polygons:', filteredVectors.size());
-  
-  // // Convert the final filtered vectors back to a raster image
-  // var finalFloodRaster = ee.Image(0).byte().paint({
-  //   featureCollection: filteredVectors,
-  //   color: 1
-  // }).clip(aoi.geometry());
+  return finalFloodRaster;
 
-  if (!CONFIG.batchMode) {
-    Map.addLayer(filteredVectors, {palette: ['#FF5733']}, 'Final Flood Raster');
-  }
-
-  // Export if requested
-  // if (exportResults || CONFIG.batchMode) {
-  //   exportFloodResults(classificationImage, finalFloodRaster, year, biWeek);
-  // }
-
-  
-    return filteredVectors;
-  
 }
 
 /**
@@ -467,18 +442,19 @@ function exportFloodResults(classification, floodRaster, year, biWeek) {
   print('Export tasks submitted for', year, 'bi-week', biWeek);
 }
 
-//================================================================================
-//================================================================================
-//================================================================================
 
 
 //================================================================================
 //================================================================================
 //================================================================================
-print('Building historical water masks for all years. This may take a moment...');
-var allMasks = buildAllYearsMasks();
-var baseInfo = classifyPerennialAndNonWater(allMasks);
-var baseClassification = baseInfo.base;
+// print('Building historical water masks for all years. This may take a moment...');
+// var allMasks = buildAllYearsMasks();
+// var baseInfo = classifyPerennialAndNonWater(allMasks);
+// var baseClassification = baseInfo.base;
+
+var allMasks;
+var baseInfo;
+var baseClassification;
 //================================================================================
 //================================================================================
 //================================================================================
@@ -490,66 +466,54 @@ var baseClassification = baseInfo.base;
 //====================ADDITIONAL FUNCTIONS FOR ROC CURVE ANALYSIS=================
 //================================================================================
 
-function calculateTPRandFPRFromVectors(predictedVectors, gtVectors,weekFreq,yearFreq,callback) {
-  // Convert both vector collections to 1/0 rasters
-  var predictedRaster = ee.Image(0).byte().paint({
-    featureCollection: predictedVectors,
-    color: 1
-  }).clip(aoi);
+function calculateTPRandFPRFromRasters(predictedRaster, gtRaster, weekFreq, yearFreq, callback) {
+  // Ensure binary 0/1 and common footprint
+  var pred = ee.Image(predictedRaster).unmask(0).gt(0);
+  var gt   = ee.Image(gtRaster).unmask(0).gt(0);
 
-  var gtRaster = ee.Image(0).byte().paint({
-    featureCollection: gtVectors,
-    color: 1
-  }).clip(aoi);
+  // Confusion components
+  var TP = pred.and(gt);
+  var FP = pred.and(gt.not());
+  var FN = gt.and(pred.not());
+  var TN = pred.not().and(gt.not());
 
-  // Compute TP, FP, FN, TN masks
-  var truePositives  = predictedRaster.and(gtRaster);
-  var falsePositives = predictedRaster.and(gtRaster.not());
-  var falseNegatives = gtRaster.and(predictedRaster.not());
-  var trueNegatives  = predictedRaster.not().and(gtRaster.not());
-
-  // Combine all in one reduceRegion call
-  var combined = ee.Image([
-    truePositives.rename('TP'),
-    falsePositives.rename('FP'),
-    falseNegatives.rename('FN'),
-    trueNegatives.rename('TN')
+  var combined = ee.Image.cat([
+    TP.rename('TP'),
+    FP.rename('FP'),
+    FN.rename('FN'),
+    TN.rename('TN')
   ]);
 
   combined.reduceRegion({
     reducer: ee.Reducer.sum(),
     geometry: aoi,
-    scale: 30,
+    // Use your working resolution; keep it consistent with your GT/projection
+    scale: GTImageRes,
     maxPixels: 1e13
   }).evaluate(function(result, error) {
     if (error) {
       print('Error calculating metrics for weekFreq:', weekFreq, 'yearFreq:', yearFreq, error);
       callback(null);
-    } else {
-      var tp = result.TP || 0;
-      var fp = result.FP || 0;
-      var fn = result.FN || 0;
-      var tn = result.TN || 0;
-
-      // Avoid division by zero
-      var tpr = (tp + fn) > 0 ? tp / (tp + fn) : 0;
-      var fpr = (fp + tn) > 0 ? fp / (fp + tn) : 0;
-
-      callback({
-        TPR: tpr,
-        FPR: fpr,
-        weekFreq: weekFreq,
-        yearFreq: yearFreq,
-        TP: tp,
-        FP: fp,
-        FN: fn,
-        TN: tn
-      });
+      return;
     }
+    var tp = result.TP || 0;
+    var fp = result.FP || 0;
+    var fn = result.FN || 0;
+    var tn = result.TN || 0;
+
+    var tpr = (tp + fn) > 0 ? tp / (tp + fn) : 0;
+    var fpr = (fp + tn) > 0 ? fp / (fp + tn) : 0;
+
+    callback({
+      TPR: tpr, FPR: fpr,
+      weekFreq: weekFreq, yearFreq: yearFreq,
+      TP: tp, FP: fp, FN: fn, TN: tn
+    });
   });
 }
 // Sequential processing function to avoid race conditions
 function processNextCombination(combinationIndex) {
+  
   if (combinationIndex >= parameterCombinations.length) {
     // All combinations processed, generate ROC curve
     print('All combinations processed. Generating ROC curve...');
@@ -560,27 +524,30 @@ function processNextCombination(combinationIndex) {
   var combo = parameterCombinations[combinationIndex];
   var weekFreq = combo.weekFreq;
   var yearFreq = combo.yearFreq;
+  var threshold = combo.threshold;
+  var perennialThreshold = combo.perennialThreshold;
   
   print('Processing combination:', combinationIndex + 1, 'of', totalCombinations, 
-        '- WeekFreq:', weekFreq, 'YearFreq:', yearFreq);
+        '- WeekFreq:', weekFreq, 'YearFreq:', yearFreq, 'Threshold: ',threshold,'perennial Threshold: ',perennialThreshold);
   
   
-  //processSelectedMasks(selectedYear,selectedWeek,yearFreq,weekFreq)
-  var result = processSelectedMask(2018, 3, yearFreq, weekFreq);
-  var layerName = 'Flood polygons' + '_Yfreq' + yearFreq + '_Wfreq' + weekFreq;
+  allMasks = buildAllYearsMasks(threshold);
+  baseInfo = classifyPerennialAndNonWater(allMasks,perennialThreshold);
+  baseClassification = baseInfo.base;
   
-  var styled = result.style({
-  color: '#60FF8B',  // Outline color
-  fillColor: '#607D8BAA',  // Fill color
-  width: 1  // Outline width in pixels
-});
-
-
-  Map.addLayer(styled, {}, layerName);
+  //////////////////////////////////////////////////////////////////////////////////
+  ///////////////////////PRINTING THE RESULT////////////////////////////////////////
+  var result = processSelectedMask(2018, 3, yearFreq, weekFreq,threshold);
+  var layerName = 'Flood raster' + '_Yfreq' + yearFreq + '_Wfreq' + weekFreq + 'VV'+threshold+'PerThreshold'+perennialThreshold;
   
+  Map.addLayer(
+    result,                       // image
+    {min: 1, max: 1, palette: ['#60FF8B']},   // visualization for raster
+    layerName
+  );
   if (result) {
       
-       calculateTPRandFPRFromVectors(result, processedGTImage,weekFreq,yearFreq, function(metrics) {
+       calculateTPRandFPRFromRasters(result, processedGTImage,weekFreq,yearFreq, function(metrics) {
       if (metrics) {
         rocResults.push(metrics);
         print('Combination', combinationIndex + 1, 'complete - TPR:', metrics.TPR.toFixed(4), 'FPR:', metrics.FPR.toFixed(4));
@@ -687,3 +654,37 @@ function generateROCCurve() {
 print('Initializing ROC analysis with', totalCombinations, 'parameter combinations...');
 print('This will process combinations sequentially to avoid race conditions.');
 runBatchProcessing();
+
+
+
+
+
+
+
+////////////////////////////MISC/////////////////////////////
+function refinedLee(img) {
+  img = img.select(0);
+
+  // Create 3×3 window weights
+  var weights3 = ee.List.repeat(ee.List.repeat(1, 3), 3);
+  var kernel3 = ee.Kernel.fixed(3, 3, weights3, 1, 1, false);
+
+  var mean3 = img.reduceNeighborhood({
+    reducer: ee.Reducer.mean(),
+    kernel: kernel3
+  });
+
+  var variance3 = img.reduceNeighborhood({
+    reducer: ee.Reducer.variance(),
+    kernel: kernel3
+  });
+
+  var sampleRatio = variance3.divide(mean3.multiply(mean3));
+
+  var one = ee.Image(1);
+  var k = sampleRatio.divide(sampleRatio.add(one));
+
+  var filtered = mean3.add(k.multiply(img.subtract(mean3)));
+  
+  return filtered.copyProperties(img, img.propertyNames());
+}
