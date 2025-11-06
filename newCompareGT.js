@@ -37,7 +37,7 @@ var CONFIG = {
 // Global variables for ROC analysis
 var rocResults = [];
 var processedCombinations = 0;
-var totalCombinations = CONFIG.batchWeekFreq.length * CONFIG.batchYearFreq.length;
+var totalCombinations = 0;
 var parameterCombinations = [];
 var GTImageRes
 var GT_PROJECTION
@@ -577,7 +577,7 @@ function runBatchProcessing() {
   
   // Generate all parameter combinations first
   generateParameterCombinations();
-  
+  totalCombinations = parameterCombinations.length;
   print('Parameter combinations generated. Starting sequential processing...');
   
   // Start processing from the first combination
