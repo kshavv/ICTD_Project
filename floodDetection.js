@@ -8,9 +8,9 @@ var CONFIG = {
   monsoonEnd: 10,   // Inclusive end month
   
   // Classification thresholds
-  threshold: -16,           
-  perennialThreshold: 0.9,  
-  weekFreq: 0.6,            
+  threshold: -18,           
+  perennialThreshold: 0.96,  
+  weekFreq: 0.5,            
   yearFreq: 0.9,            
   
   // Processing parameters
@@ -74,9 +74,10 @@ function processGroundTruth(gtImage, minAreaSqm) {
   }).clip(processingGeom);
   
   // Visualize: 0 = black (non-flooded), 1 = green (flooded)
-  Map.addLayer(filteredVectors, 
-              {min: 0, max: 1, palette: ['#000000', '#00FF00']}, 
-              'Final GT Raster');
+  //DEBUG-------------------
+  // Map.addLayer(filteredVectors, 
+  //             {min: 0, max: 1, palette: ['#000000', '#00FF00']}, 
+  //             'Final GT Raster');
 
   var rasterFileName = 'GT_flood_raster_';
   var rasterDescription = 'GT_Flood_Raster_';
@@ -92,14 +93,14 @@ processedGTImage = processGroundTruth(gt, 300000);
   var myPredictionRegion = districts.filter(ee.Filter.and(
     ee.Filter.eq("ADM1_NAME", "Kerala"),
       ee.Filter.or(
-      // ee.Filter.eq("ADM2_NAME", "Ernakulam"),
+      ee.Filter.eq("ADM2_NAME", "Ernakulam"),
       ee.Filter.eq("ADM2_NAME", "Kottayam"),
       ee.Filter.eq("ADM2_NAME", "Alappuzha"),
       ee.Filter.eq("ADM2_NAME", "Pattanamtitta")
     )
   ));
   
-  Map.addLayer(myPredictionRegion,{},'my_predicred_region');
+  
 
 
 function setupRegion() {
@@ -110,8 +111,8 @@ function setupRegion() {
     aoi = region.geometry().centroid().buffer(CONFIG.regionBoundsSize / 2).bounds();
     print('Using centered export box of size (m):', CONFIG.regionBoundsSize);
   } else {
-    aoi = myPredictionRegion; //return the entire region
-    // aoi = processedGTImage.geometry(); 
+    // aoi = myPredictionRegion; //return the entire region
+    aoi = processedGTImage.geometry(); 
     // aoi = gt;
     print('Using default AOI bounds for export.');
   }
@@ -122,7 +123,7 @@ function setupRegion() {
 // Initialize AOI
 var aoi = setupRegion();
 Map.centerObject(aoi);
-Map.addLayer(aoi, {}, 'AOI');
+// Map.addLayer(aoi, {}, 'AOI'); //DEBUG-------------
 
 
 // ==================== DATA COLLECTION (LOGIC FROM SCRIPT 2) ====================
