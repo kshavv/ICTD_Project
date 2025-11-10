@@ -26,12 +26,19 @@ var CONFIG = {
   
   // Batch processing mode
   batchMode: true,
-  batchWeekFreq: [0.5,0.6,0.7,0.8,0.9,1.0],
-  batchYearFreq: [0.5,0.6,0.7,0.8,0.9,1.0],
-  thresholdList: [-15,-16,-17,-18],
-  perennialThresholdList:[0.8,0.82,0.84,0.86,0.88,0.90,0.92,0.94,0.96]
+  // batchWeekFreq: [0.5,0.6,0.7,0.8,0.9,1.0],
+  // batchYearFreq: [0.5,0.6,0.7,0.8,0.9,1.0],
+  // thresholdList: [-15,-16,-17,-18],
+  // perennialThresholdList:[0.8,0.82,0.84,0.86,0.88,0.90,0.92,0.94,0.96]
+    batchWeekFreq: [0.5,0.6],
+  batchYearFreq: [0.5,0.6],
+  thresholdList: [-15,-16],
+  perennialThresholdList:[0.8,0.9]
 
 };
+
+var batchSize = 100;
+var currentBatchStart = 0;
 
 //=========================================================
 // Global variables for ROC analysis
@@ -579,10 +586,64 @@ function runBatchProcessing() {
   generateParameterCombinations();
   totalCombinations = parameterCombinations.length;
   print('Parameter combinations generated. Starting sequential processing...');
+  print('total combination: ',totalCombinations)
+  
+  print(totalCombinations)
   
   // Start processing from the first combination
-  processNextCombination(0);
+  // processNextCombination(0);
+    // Kick off first batch
+  runNextBatch();
 }
+
+
+function runNextBatch() {
+  if (currentBatchStart >= totalCombinations) {
+    print('All batches finished.');
+    generateROCCurve();   // final output
+    return;
+  }
+
+  var currentBatchEnd = Math.min(currentBatchStart + batchSize, totalCombinations);
+  var batch = parameterCombinations.slice(currentBatchStart, currentBatchEnd);
+
+  print('Processing batch', (currentBatchStart / batchSize) + 1,
+        '→ Combinations', currentBatchStart + 1, 'to', currentBatchEnd);
+
+  // Process this batch sequentially
+  processBatchCombinations(batch, 0, function() {
+    currentBatchStart = currentBatchEnd;
+    runNextBatch(); // Move to next batch after finishing this one
+  });
+}
+
+function processBatchCombinations(batch, idx, doneCallback) {
+
+  if (idx >= batch.length) {
+    doneCallback(); 
+    return;
+  }
+
+  var combo = batch[idx];
+
+  allMasks = buildAllYearsMasks(combo.threshold);
+  baseInfo = classifyPerennialAndNonWater(allMasks, combo.perennialThreshold);
+  baseClassification = baseInfo.base;
+
+  var result = processSelectedMask(2018, 3, combo.yearFreq, combo.weekFreq, combo.threshold);
+
+  if (result) {
+    calculateTPRandFPRFromRasters(
+      result, processedGTImage, combo.weekFreq, combo.yearFreq,
+      function(metrics) {
+        if (metrics) rocResults.push(metrics);
+        processBatchCombinations(batch, idx + 1, doneCallback);
+      });
+  } else {
+    processBatchCombinations(batch, idx + 1, doneCallback);
+  }
+}
+
 
 // Function to generate and display ROC curve
 function generateROCCurve() {
@@ -687,4 +748,36 @@ function refinedLee(img) {
   var filtered = mean3.add(k.multiply(img.subtract(mean3)));
   
   return filtered.copyProperties(img, img.propertyNames());
+}
+
+function exportROCResultsToDrive(pr) {
+  var csvHeader = 'WeekFreq,YearFreq,Threshold,PerennialThreshold,TPR,FPR,TP,FP,FN,TN\n';
+  var csvRows = rocResults.map(function(r) {
+    return [
+      r.weekFreq,
+      r.yearFreq,
+      r.threshold,
+      r.perennialThreshold,
+      r.TPR,
+      r.FPR,
+      r.TP,
+      r.FP,
+      r.FN,
+      r.TN
+    ].join(',');
+  }).join('\n');
+
+  var csvContent = csvHeader + csvRows;
+
+  var csvFile = ee.String(csvContent).replace('\r', '');
+
+  Export.table.toDrive({
+    collection: ee.FeatureCollection([ee.Feature(null, {csv: csvFile})]),
+    description: 'ROC_Results_Batch_' + batchIndex,
+    fileNamePrefix: 'ROC_Results_Batch_' + batchIndex,
+    folder: CONFIG.driveFolder,
+    fileFormat: 'CSV'
+  });
+
+  print('✅ Export task submitted for Batch', batchIndex);
 }
