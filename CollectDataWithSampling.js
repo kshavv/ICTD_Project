@@ -87,14 +87,14 @@ function getClosestS2Image(targetDate, geom) {
         .difference(targetDate, 'day')
         .abs();
       return img
-        .select(['B2','B3','B4','B8'])   // select HERE
+        .select(['B2','B3','B4','B8','B5','B6','B7','B8A'])   // select HERE
         .set('timeDiff', diff);
     })
     .sort('timeDiff');
 
   // Fallback WITH SAME BAND NAMES
-  var empty = ee.Image.constant([0,0,0,0])
-    .rename(['B2','B3','B4','B8'])
+  var empty = ee.Image.constant([0,0,0,0,0,0,0,0])
+    .rename(['B2','B3','B4','B8','B5','B6','B7','B8A'])
     .selfMask();
 
   return ee.Image(
@@ -173,7 +173,7 @@ print(perPolyLimited.limit(20));
 ///SAMPLING NEW NON WATER DATA POINTS///
 /////////////////////// ////////////////
 
-var bufferDist = 20;         // outward buffer (m)
+var bufferDist = 30;         // outward buffer (m)
 var samplesPerPoly = 10;      // N samples per polygon
 var scale = 10;   
 
@@ -289,7 +289,7 @@ var finalDataset = combined.map(function(f) {
 
         var stacked = s1.select(['VV', 'VH'])
                          .addBands(
-                           s2.select(['B2', 'B3', 'B4', 'B8'])
+                           s2.select(['B2','B3','B4','B8','B5','B6','B7','B8A'])
                          );
 
         var sampled = stacked.sample({
@@ -320,7 +320,7 @@ var finalDataset = combined.map(function(f) {
   );
 });
 
-print(finalDataset.first())
+// print(finalDataset.first())
 print('Enriched With Sentinel points :', finalDataset.size());
 print(finalDataset.limit(20))
 
@@ -354,12 +354,13 @@ var withLatLon = finalDataset.map(addLatLon);
 // ----------------------------------
 var keepList = [
   'id','Name',
-  'B2', 'B3', 'B4', 'B8',
+  'B2', 'B3', 'B4', 'B8','B5','B6','B7','B8A',
   'VH', 'VV',
   'latitude', 'longitude',
   'day', 'month', 'year',
   'poly_area_m2',        
   'waterType','s1_day_diff','s2_day_diff','sample_missing',
+  's1_datetime_utc','s2_datetime_utc'
 ];
 
 
@@ -405,15 +406,15 @@ Export.table.toDrive({
   collection: cleanedNoGeom,
   description: 'final_pixel_dataset_cleaned',
   folder: 'keshav_sparsh/Tiffs',
-  fileNamePrefix: 'pixel_data_v1',
+  fileNamePrefix: 'pixel_data_v2',
   fileFormat: 'CSV'
 });
 
 // Export.table.toDrive({
 //   collection: cleanedNoGeom.limit(10),
 //   description: 'final_pixel_dataset_cleaned',
-//   folder: 'keshav_sparsh/Tiffs',
-//   fileNamePrefix: 'pixel_data_v1',
+//   folder: 'keshav_sparsh\\Tiffs',
+//   fileNamePrefix: 'pixel_data_v1_test',
 //   fileFormat: 'CSV'
 // });
 
