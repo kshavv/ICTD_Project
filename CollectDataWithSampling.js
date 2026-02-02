@@ -450,7 +450,7 @@ Export.table.toDrive({
 
 ////////////////////////////////DEBUG////////////////////////////////////////
 print('-------------Start of Debug Block-------------')
-var polyName = '08W05102022';
+var polyName = '101W05042025';
 // 08W05102022
 //04W29102019
 var poly = ee.Feature(
